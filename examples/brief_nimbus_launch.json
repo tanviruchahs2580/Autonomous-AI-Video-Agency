@@ -1,0 +1,21 @@
+{
+  "title": "Nimbus CRM Launch",
+  "objective": "Show sales leaders how Nimbus CRM automates follow-ups, gives real-time pipeline visibility and protects every deal with one-click rollback of any workflow.",
+  "audience": "sales leaders at growing companies",
+  "platform": "youtube",
+  "duration_s": 30,
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "cta": "Book a demo today",
+  "language": "en",
+  "brand": {
+    "name": "Nimbus",
+    "palette": ["#101820", "#1F6FEB", "#F2F7FA", "#FFB000"]
+  },
+  "key_points": [
+    "Automated follow-ups save hours every single week",
+    "Real-time dashboards give complete pipeline visibility",
+    "One-click rollback protects every deal automatically"
+  ]
+}

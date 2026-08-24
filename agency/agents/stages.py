@@ -810,8 +810,9 @@ def stage_multimodal_qa(db, job: Job, task: Task, context: dict) -> dict:
     brief_sources = [spec["objective"], spec["title"], *[f"{k}" for k in spec.get("key_points", [])], *context["state"].get("ctx_research", {}).get("points", [])]
     coverage, keyword_count = concept_coverage(brief_sources, script["full_text"])
     min_coverage = 0.45 if float(spec["duration_s"]) >= 15 else (0.30 if float(spec["duration_s"]) >= 8 else 0.18)
+    coverage_note = None
     if keyword_count < 3:
-        findings_note = f"brief provides only {keyword_count} scorable concepts; coverage gate not applied"
+        coverage_note = f"only {keyword_count} scorable brief concepts; coverage gate not applied"
         coverage = max(coverage, min_coverage)
     elif coverage < min_coverage:
         findings.append(f"script covers only {coverage:.0%} of brief concepts (min {min_coverage:.0%} for {spec['duration_s']:.0f}s)")
@@ -828,7 +829,10 @@ def stage_multimodal_qa(db, job: Job, task: Task, context: dict) -> dict:
     report = QAReport(project_id=job.project_id, job_id=job.id, task_id=task.id, layer="multimodal", passed=passed, score=round(max(0.0, coverage), 2), findings=findings)
     db.add(report)
     db.commit()
-    context["state"].setdefault("qa_summary", {})["multimodal"] = {"passed": passed, "findings": findings, "brief_coverage": round(coverage, 2)}
+    qa_mm: dict = {"passed": passed, "findings": findings, "brief_coverage": round(coverage, 2)}
+    if coverage_note:
+        qa_mm["coverage_note"] = coverage_note
+    context["state"].setdefault("qa_summary", {})["multimodal"] = qa_mm
     if not passed:
         raise TaskFailure(f"multimodal QA failed: {'; '.join(findings)}", failure_class="qa_multimodal")
     return {"passed": True, "brief_coverage": round(coverage, 2)}

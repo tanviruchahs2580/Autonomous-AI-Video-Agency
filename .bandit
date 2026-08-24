@@ -1,0 +1,2 @@
+exclude_dirs: ['tests', 'data', '.venv', 'node_modules']
+skips: ['B404', 'B603']

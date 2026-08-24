@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomous-ai-video-agency"
+version = "1.0.0"
+description = "Autonomous AI Video Agency: brief-to-delivery production system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+include = ["agency*"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101", "S603", "S607", "B008", "UP007", "UP045", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+no_strict_optional = true
+exclude = ["tests", "data"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "e2e: end-to-end production tests (slow)",
+    "integration: integration tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "data", ".venv"]
+
+[tool.bandit.assert_used]
+skips = ["*_test.py", "tests/*"]
+
+[[tool.bandit.suppressions]]
+code = "B404"
+reason = "subprocess is required to invoke ffmpeg/ffprobe binaries"
+
+[[tool.bandit.suppressions]]
+code = "B603"
+reason = "all invocations use argument lists (never shell=True) with server-controlled inputs"

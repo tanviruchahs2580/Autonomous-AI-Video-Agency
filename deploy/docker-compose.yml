@@ -1,0 +1,45 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      AGENCY_ENV: production
+      AGENCY_API_KEY: ${AGENCY_API_KEY:?set AGENCY_API_KEY in .env}
+      AGENCY_DB_URL: sqlite:////app/data/agency.db
+      AGENCY_DATA_DIR: /app/data
+      AGENCY_STORAGE_DIR: /app/data/storage
+      AGENCY_RATE_LIMIT_PER_MIN: "120"
+      AGENCY_APPROVAL_REQUIRED: ${AGENCY_APPROVAL_REQUIRED:-false}
+    ports:
+      - "8000:8000"
+    volumes:
+      - agency-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["python", "-m", "agency", "worker"]
+    environment:
+      AGENCY_ENV: production
+      AGENCY_API_KEY: ${AGENCY_API_KEY:-worker-local}
+      AGENCY_DB_URL: sqlite:////app/data/agency.db
+      AGENCY_DATA_DIR: /app/data
+      AGENCY_STORAGE_DIR: /app/data/storage
+      AGENCY_TTS_PROVIDER: ${AGENCY_TTS_PROVIDER:-synth}
+    volumes:
+      - agency-data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  agency-data:

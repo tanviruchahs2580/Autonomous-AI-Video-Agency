@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install python dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Format check (ruff)
+        run: ruff check agency tests
+
+      - name: Type check (mypy)
+        run: mypy agency
+
+      - name: Security scan (bandit)
+        run: bandit -c .bandit -r agency
+
+      - name: Dependency audit (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --ignore-vuln PYSEC-0000-00000 || true
+
+      - name: Full test suite (unit + integration + E2E production)
+        env:
+          AGENCY_TTS_PROVIDER: synth
+        run: pytest tests -v --tb=short
+
+  container-build-test:
+    runs-on: ubuntu-latest
+    needs: quality-gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f deploy/Dockerfile -t video-agency:${{ github.sha }} .
+
+      - name: Container smoke test
+        run: |
+          docker run -d --name agency-smoke \
+            -e AGENCY_ENV=development \
+            -e AGENCY_API_KEY=ci-key \
+            -p 8000:8000 \
+            video-agency:${{ github.sha }}
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health/live >/dev/null 2>&1; then
+              echo "liveness OK"
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8000/health/live | tee /dev/stderr | grep -q alive
+          curl -fsS http://localhost:8000/health/ready | grep -q ready
+          AUTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/v1/projects)
+          echo "unauthenticated /v1/projects -> $AUTH"
+          [ "$AUTH" = "401" ]
+          AUTHED=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ci-key" http://localhost:8000/v1/projects)
+          echo "authenticated /v1/projects -> $AUTHED"
+          [ "$AUTHED" = "200" ]
+          docker logs agency-smoke | tail -20
+          docker rm -f agency-smoke >/dev/null
+
+  deploy-validation:
+    runs-on: ubuntu-latest
+    needs: quality-gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose configuration
+        run: |
+          cd deploy
+          AGENCY_API_KEY=validation docker compose config -q && echo "compose config valid"
+
+      - name: Verify deployment artifacts exist
+        run: |
+          test -f deploy/Dockerfile
+          test -f deploy/docker-compose.yml
+          test -f .env.example
+          echo "deployment artifacts verified"

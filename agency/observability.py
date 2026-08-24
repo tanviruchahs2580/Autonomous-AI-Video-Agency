@@ -56,6 +56,7 @@ def audit(
     entity_type: str,
     entity_id: str,
     detail: dict[str, Any] | None = None,
+    org_id: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     ctx: dict[str, Any] = {"actor": actor, "action": action}
     yield ctx
@@ -65,14 +66,15 @@ def audit(
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
-            detail_json=json.dumps({**(detail or {}), **{k: v for k, v in ctx.items() if k not in ("actor", "action")}}, default=str),
+            org_id=org_id or ctx.get("org_id"),
+            detail_json=json.dumps({**(detail or {}), **{k: v for k, v in ctx.items() if k not in ("actor", "action", "org_id")}}, default=str),
         )
     )
     db.commit()
 
 
-def emit_event(db: Session, job_id: str | None, task_id: str | None, level: str, event: str, data: dict[str, Any] | None = None) -> None:
-    db.add(Event(job_id=job_id, task_id=task_id, level=level, event=event, data_json=json.dumps(data or {}, default=str)))
+def emit_event(db: Session, job_id: str | None, task_id: str | None, level: str, event: str, data: dict[str, Any] | None = None, org_id: str | None = None) -> None:
+    db.add(Event(job_id=job_id, task_id=task_id, level=level, event=event, org_id=org_id, data_json=json.dumps(data or {}, default=str)))
     db.commit()
 
 
@@ -87,12 +89,14 @@ def record_cost(
     quantity: float,
     unit: str,
     amount_usd: float,
+    org_id: str | None = None,
 ) -> None:
     db.add(
         CostEntry(
             project_id=project_id,
             job_id=job_id,
             task_id=task_id,
+            org_id=org_id,
             category=category,
             provider=provider,
             model=model,

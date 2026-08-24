@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-08-24T21:54:51.753502+00:00",
+  "host_cpus": 8,
+  "api": {
+    "p50_ms": 17.9,
+    "p95_ms": 164.8,
+    "p99_ms": 317.4,
+    "min_ms": 6.7,
+    "max_ms": 344.4,
+    "n": 300,
+    "wall_s": 30.96,
+    "rps": 9.7,
+    "errors": {
+      "4xx": 0,
+      "5xx": 0
+    }
+  },
+  "renders": {
+    "jobs": 24,
+    "workers": 6,
+    "enqueue_s": 0.06,
+    "wall_s": 2.03,
+    "completed": 22,
+    "failed": 2,
+    "throughput_per_min": 651.3,
+    "queue_latency_s": {
+      "p50_ms": 2016.3,
+      "p95_ms": 2026.3,
+      "p99_ms": 2027.3,
+      "min_ms": 2006.2,
+      "max_ms": 2027.3,
+      "n": 24
+    }
+  }
+}

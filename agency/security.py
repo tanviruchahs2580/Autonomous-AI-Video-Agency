@@ -21,10 +21,19 @@ MAGIC_SIGNATURES: list[tuple[str, bytes]] = [
 ]
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {"read", "write", "approve", "admin"},
+    "owner": {"read", "write", "approve", "admin", "manage_users", "audit"},
+    "admin": {"read", "write", "approve", "admin", "manage_users", "audit"},
+    "producer": {"read", "write", "approve"},
     "editor": {"read", "write"},
-    "approver": {"read", "approve"},
-    "viewer": {"read"},
+    "reviewer": {"read", "approve"},
+    "client": {"read"},
+    "auditor": {"read", "audit"},
+    "service_account": {"read", "write"},
+}
+
+ROLE_ALIASES = {
+    "viewer": "client",
+    "approver": "reviewer",
 }
 
 
@@ -118,6 +127,14 @@ class RateLimiter:
             return False
         self._windows[key] = (count + 1, window_start)
         return True
+
+
+def resolve_role(role: str) -> str:
+    return ROLE_ALIASES.get(role, role)
+
+
+def permissions_for(role: str) -> set[str]:
+    return ROLE_PERMISSIONS.get(resolve_role(role), set())
 
 
 def write_private_temp(data: bytes, suffix: str) -> Path:

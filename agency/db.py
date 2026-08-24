@@ -29,7 +29,26 @@ def get_engine():
         settings = get_settings()
         _ensure_sqlite_dir(settings.db_url)
         connect_args = {"check_same_thread": False} if settings.db_url.startswith("sqlite") else {}
-        _engine = create_engine(settings.db_url, connect_args=connect_args, pool_pre_ping=True)
+        _engine = create_engine(
+            settings.db_url,
+            connect_args=connect_args,
+            pool_pre_ping=True,
+            pool_size=10 if not settings.db_url.startswith("sqlite") else 0,
+            max_overflow=20 if not settings.db_url.startswith("sqlite") else 0,
+            pool_timeout=30,
+            pool_recycle=1800,
+        )
+        if settings.db_url.startswith("sqlite"):
+            from sqlalchemy import event
+
+            @event.listens_for(_engine, "connect")
+            def _sqlite_pragma(dbapi_conn, _record):
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA busy_timeout=30000")
+                cur.execute("PRAGMA foreign_keys=ON")
+                cur.close()
+
         _session_factory = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
     return _engine
 
@@ -69,7 +88,16 @@ def applied_versions(db: Session) -> list[str]:
 
 def available_migrations() -> list[Path]:
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
-    return [f for f in files if f.stem != "schema"]
+    return [f for f in files if f.stem != "schema" and not f.stem.endswith("_down")]
+
+
+def down_path_for(version: str) -> Path | None:
+    prefix = version.split("_", 1)[0]
+    candidates = [MIGRATIONS_DIR / f"{version}_down.sql", MIGRATIONS_DIR / f"{prefix}_down.sql"]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 
 def run_migrations(db: Session) -> list[str]:
@@ -87,6 +115,28 @@ def run_migrations(db: Session) -> list[str]:
         db.commit()
         executed.append(version)
     return executed
+
+
+def downgrade_one(db: Session) -> str | None:
+    done = applied_versions(db)
+    if not done:
+        return None
+    latest = done[-1]
+    down_file = down_path_for(latest)
+    if down_file is None:
+        raise RuntimeError(f"migration {latest} has no down script")
+    statements = [s.strip() for s in down_file.read_text(encoding="utf-8").split(";") if s.strip()]
+    for stmt in statements:
+        try:
+            db.execute(text(stmt))
+        except Exception as exc:
+            db.rollback()
+            if "no such column" in str(exc).lower() or "does not exist" in str(exc).lower():
+                continue
+            raise
+    db.execute(text("DELETE FROM schema_migrations WHERE version = :v"), {"v": latest})
+    db.commit()
+    return latest
 
 
 def init_db() -> list[str]:

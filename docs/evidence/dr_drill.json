@@ -1,0 +1,25 @@
+{
+  "started": "2026-08-24T20:23:59.403073+00:00",
+  "workdir": "C:\\Users\\DST\\AppData\\Local\\Temp\\agency-dr-t845tr1c",
+  "artifact_sha256_before": "6ced25ea2ef26b9a1e7f5d54241e7fcef4cc16e669229e93f469d5e9472c7112",
+  "backup_seconds": 0.388,
+  "backup_files": [
+    "artifacts.tar",
+    "drill.db"
+  ],
+  "damage_injected": {
+    "deliverables_rows": "deleted",
+    "job_state": "failed",
+    "master_deleted": true
+  },
+  "restore_seconds_rto_s": 0.259,
+  "verify": {
+    "deliverables_rows_restored": 2,
+    "job_state_restored": "completed",
+    "master_recreated": true,
+    "sha256_match": true
+  },
+  "rpo_s": 0.338,
+  "passed": true,
+  "finished": "2026-08-24T20:25:42.499108+00:00"
+}

@@ -1,0 +1,19 @@
+-- 001_down: full schema rollback (destructive - production use requires a prior backup)
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS costs;
+DROP TABLE IF EXISTS deliverables;
+DROP TABLE IF EXISTS approvals;
+DROP TABLE IF EXISTS repairs;
+DROP TABLE IF EXISTS qa_reports;
+DROP TABLE IF EXISTS timelines;
+DROP TABLE IF EXISTS storyboards;
+DROP TABLE IF EXISTS scripts;
+DROP TABLE IF EXISTS artifacts;
+DROP TABLE IF EXISTS assets;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS tenants;

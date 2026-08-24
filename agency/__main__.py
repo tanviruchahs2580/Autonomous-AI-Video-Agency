@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -34,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     p_backup = sub.add_parser("backup", help="backup database")
     p_backup.add_argument("--target", required=True)
     sub.add_parser("agents", help="print agent registry")
+    p_cleanup = sub.add_parser("cleanup", help="artifact retention cleanup")
+    p_cleanup.add_argument("--older-than-days", type=int, default=30)
+    p_cleanup.add_argument("--apply", action="store_true", help="without this flag the run is dry-run only")
+    p_cleanup.add_argument("--include-orphans", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -61,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "agents":
         print(json.dumps(get_registry(), indent=2))
+        return 0
+
+    if args.command == "cleanup":
+        from agency.lifecycle import run_cleanup
+
+        summary = run_cleanup(older_than_days=args.older_than_days, apply=args.apply, include_orphans=args.include_orphans)
+        print(json.dumps(summary, indent=2))
         return 0
 
     if args.command == "status":

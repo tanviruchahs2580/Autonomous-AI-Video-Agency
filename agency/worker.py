@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
@@ -64,6 +64,15 @@ def run_worker(poll_seconds: float | None = None, max_jobs: int | None = None) -
             with session_scope() as db:
                 job = claim_next_job(db, worker_id=worker_id)
             if job is None:
+                try:
+                    from agency.webhooks import process_pending_deliveries
+
+                    with session_scope() as db:
+                        stats = process_pending_deliveries(db)
+                        if any(stats.values()):
+                            logger.info("webhook deliveries processed: %s", stats)
+                except Exception:
+                    logger.exception("webhook delivery drain failed")
                 time.sleep(poll)
                 continue
             with session_scope() as db:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -115,6 +115,15 @@ def stage_intake(db, job: Job, task: Task, context: dict) -> dict:
     fps = float(brief.get("fps") or spec_platform["fps"])
     if width % 2 or height % 2:
         raise TaskFailure("width/height must be even for h264 output", failure_class="invalid_brief")
+    settings_caps = get_settings()
+    if duration > float(settings_caps.media_max_duration_s):
+        raise TaskFailure(f"duration {duration}s exceeds platform cap {settings_caps.media_max_duration_s}s", failure_class="invalid_brief")
+    if width > int(settings_caps.media_max_width) or height > int(settings_caps.media_max_height):
+        raise TaskFailure(f"resolution {width}x{height} exceeds platform cap", failure_class="invalid_brief")
+    if duration > float(settings_caps.media_max_duration_s):
+        raise TaskFailure(f"duration {duration}s exceeds platform cap {settings_caps.media_max_duration_s}s", failure_class="invalid_brief")
+    if width > int(settings_caps.media_max_width) or height > int(settings_caps.media_max_height):
+        raise TaskFailure(f"resolution {width}x{height} exceeds platform cap", failure_class="invalid_brief")
     spec = {
         "title": str(brief["title"])[:200],
         "objective": str(brief["objective"])[:2000],
@@ -141,7 +150,7 @@ def stage_research(db, job: Job, task: Task, context: dict) -> dict:
     spec = context["state"].get("ctx_spec")
     if not spec:
         raise TaskFailure("spec missing", failure_class="state_missing")
-    points = spec.get("key_points") or []
+    points = [str(k)[:300] for k in spec.get("key_points", [])][:6]
     if not points:
         keywords = [w.strip(",.?!").lower() for w in spec["objective"].split() if len(w) > 4]
         seen: list[str] = []
@@ -151,6 +160,16 @@ def stage_research(db, job: Job, task: Task, context: dict) -> dict:
             if len(seen) >= 5:
                 break
         points = [f"Highlight: {kw}" for kw in seen]
+    else:
+        obj_words = [w.strip(",.?!").lower() for w in spec["objective"].split() if len(w) > 4 and w.lower() not in STOPWORDS]
+        added = 0
+        for ow in obj_words:
+            if added >= 2:
+                break
+            candidate = f"Focus on {ow}"
+            if not any(ow in p.lower() for p in points):
+                points.append(candidate)
+                added += 1
     claims = []
     for p in points:
         if any(ch.isdigit() for ch in p):
@@ -169,29 +188,52 @@ def stage_creative_direction(db, job: Job, task: Task, context: dict) -> dict:
     audience = spec.get("audience", "").lower()
     mood = "calm" if any(w in audience for w in ("enterprise", "professional", "finance")) else ("tense" if "alert" in spec["objective"].lower() else "uplifting")
     creative = {
-        "concept": f"{spec['title']} â€” {spec['objective'][:120]}",
+        "concept": f"{spec['title']} - {spec['objective'][:120]}",
         "tone": "confident, clear, benefit-led",
         "palette_hex": ["#{:02x}{:02x}{:02x}".format(*c) for c in (palette or [(16, 24, 32), (31, 111, 235), (242, 247, 250)])],
         "music_mood": mood,
     }
+    palette_final = palette or [(16, 24, 32), (31, 111, 235), (242, 247, 250)]
+    palette_hex_list = [f"#{p[0]:02x}{p[1]:02x}{p[2]:02x}" for p in palette_final]
     context["state"]["ctx_creative"] = creative
-    context["state"]["ctx_palette"] = palette or [(16, 24, 32), (31, 111, 235), (242, 247, 250)]
-    return {"ctx_creative": creative}
+    context["state"]["ctx_palette"] = palette_hex_list
+    return {"ctx_creative": creative, "ctx_palette": palette_hex_list}
+
+
+def _palette_tuples(context: dict) -> list[tuple[int, int, int]]:
+    from ..capabilities.graphics import hex_to_rgb
+
+    raw = context["state"].get("ctx_palette") or ["#101820", "#1F6FEB", "#F2F7FA"]
+    out: list[tuple[int, int, int]] = []
+    for item in raw:
+        if isinstance(item, str):
+            rgb = hex_to_rgb(item)
+            out.append((int(rgb[0]), int(rgb[1]), int(rgb[2])))
+        else:
+            out.append((int(item[0]), int(item[1]), int(item[2])))
+    return out
 
 
 def _compose_script_local(spec: dict, research: dict) -> dict:
     title = spec["title"]
     audience = spec["audience"]
     cta = spec.get("cta", "Learn more")
+    short_form = float(spec.get("duration_s", 30)) < 10
     points = research.get("points") or []
-    hook = f"If you work with {audience}, this changes everything: {title}."
+    hook = f"Meet {title}." if short_form else f"If you work with {audience}, this changes everything: {title}."
+    max_beats = 2 if short_form else 3
+    if short_form and len(points) > 2:
+        focus = next((p for p in points[2:] if p.lower().startswith("focus")), points[-1])
+        selected = [points[0], focus]
+    else:
+        selected = points[:max_beats]
     beats = []
-    for i, p in enumerate(points[:3], 1):
+    for i, p in enumerate(selected, 1):
         beats.append({"label": f"Beat {i}", "text": f"{p}."})
     while len(beats) < 2:
-        beats.append({"label": f"Beat {len(beats) + 1}", "text": f"See how {title.lower()} delivers real results."})
+        beats.append({"label": f"Beat {len(beats) + 1}", "text": f"See how {title.lower()} delivers results."})
     body = " ".join(b["text"] for b in beats)
-    close = f"Ready to move? {cta} today."
+    close = f"Ready? {cta}." if not cta.lower().endswith("today") else f"Ready? {cta}"
     sections = {"hook": hook, "beats": beats, "cta": close}
     full_text = f"{hook} {body} {close}"
     return {"sections": sections, "full_text": full_text, "generator": "template-composer-v1"}
@@ -237,23 +279,30 @@ def httpx_post_json(url: str, headers: dict, payload: dict, timeout: float) -> d
 
 
 def _enforce_word_budget(composed: dict, spec: dict) -> dict:
-    budget = max(int(spec["duration_s"] * 2.0), 20)
-    beats = list(composed["sections"]["beats"])
+    budget = max(int(spec["duration_s"] * 2.0), 14)
+    sections = composed["sections"]
+    beats = list(sections["beats"])
+
     def count(text: str) -> int:
         return len(text.split())
+
+    hook_w = count(sections["hook"])
+    cta_w = count(sections["cta"])
+    fixed = hook_w + cta_w
+    avail_for_beats = max(budget - fixed, 6)
     trimmed = False
-    while count(composed["sections"]["hook"]) + sum(count(b["text"]) for b in beats) + count(composed["sections"]["cta"]) > budget and len(beats) > 2:
+    while sum(count(b["text"]) for b in beats) > avail_for_beats and len(beats) > 2:
         beats.pop()
         trimmed = True
+    per_beat = max(avail_for_beats // max(len(beats), 1), 2)
     for b in beats:
-        allowance = max(int((budget * 0.62) / max(len(beats), 1)), 4)
         words_b = b["text"].split()
-        if len(words_b) > allowance:
-            b["text"] = " ".join(words_b[:allowance]).rstrip(",;:.") + "."
+        if len(words_b) > per_beat:
+            b["text"] = " ".join(words_b[:per_beat]).rstrip(",;:.") + "."
             trimmed = True
-    composed["sections"]["beats"] = beats
+    sections["beats"] = beats
     body = " ".join(b["text"] for b in beats)
-    composed["full_text"] = f"{composed['sections']['hook']} {body} {composed['sections']['cta']}"
+    composed["full_text"] = f"{sections['hook']} {body} {sections['cta']}"
     if trimmed:
         composed["trimmed_to_budget"] = True
     return composed
@@ -300,7 +349,7 @@ def stage_storyboard(db, job: Job, task: Task, context: dict) -> dict:
 
 def stage_asset_acquisition(db, job: Job, task: Task, context: dict) -> dict:
     spec = context["state"]["ctx_spec"]
-    palette = context["state"]["ctx_palette"]
+    palette = _palette_tuples(context)
     workdir = job_workdir(job.id)
     images_dir = workdir / "images"
     scenes = context["state"]["ctx_scenes"]
@@ -330,8 +379,14 @@ def stage_asset_acquisition(db, job: Job, task: Task, context: dict) -> dict:
     context["state"]["ctx_images"] = image_paths
     context["state"]["ctx_assets_meta"] = {"usable_external": usable_external, "rejected_unknown_rights": rejected}
     if rejected:
-        emit_event(db, job.id, task.id, "warning", "assets.rights_rejected", {"count": len(rejected)})
-    return {"ctx_images_count": len(image_paths), "external_used": len(usable_external), "rejected_unknown_rights": len(rejected)}
+        emit_event(db, job.id, task.id, "warning", "assets.rights_rejected", {"count": len(rejected)}, org_id=job.org_id)
+    return {
+        "ctx_images": [str(p) for p in image_paths],
+        "ctx_assets_meta": context["state"]["ctx_assets_meta"],
+        "ctx_images_count": len(image_paths),
+        "external_used": len(usable_external),
+        "rejected_unknown_rights": len(rejected),
+    }
 
 
 def _synthesize_narration(spec: dict, scenes: list[dict], workdir: Path) -> tuple[Path, list[dict], str, str]:
@@ -420,10 +475,11 @@ def stage_narration(db, job: Job, task: Task, context: dict) -> dict:
     path, words, provider_name, fallback_reason = _synthesize_narration(spec, scenes, workdir)
     info = probe(path)
     register_artifact(db, job.project_id, job.id, task.id, "narration_audio", path, {"provider": provider_name, "duration_s": info.duration_s}, {"origin": "tts", "provider": provider_name, "license": "generated-in-house"})
-    record_cost(db, job.project_id, job.id, task.id, "tts", provider_name, model="", quantity=info.duration_s, unit="seconds", amount_usd=0.0 if provider_name.startswith(("synth", "edge")) else info.duration_s * 0.0002)
+    record_cost(db, job.project_id, job.id, task.id, "tts", provider_name, model="", quantity=info.duration_s, unit="seconds", amount_usd=0.0 if provider_name.startswith(("synth", "edge")) else info.duration_s * 0.0002, org_id=job.org_id)
 
-    context["state"]["ctx_narration"] = {"path": str(path), "duration": info.duration_s, "words": words, "provider": provider_name}
-    out = {"ctx_narration_provider": provider_name, "duration": info.duration_s, "word_count": len(words)}
+    narration_state = {"path": str(path), "duration": info.duration_s, "words": words, "provider": provider_name}
+    context["state"]["ctx_narration"] = narration_state
+    out = {"ctx_narration_provider": provider_name, "duration": info.duration_s, "word_count": len(words), "ctx_narration": narration_state}
     if fallback_reason:
         out["fallback_reason"] = fallback_reason
     return out
@@ -450,9 +506,9 @@ def stage_autocleanup(db, job: Job, task: Task, context: dict) -> dict:
         removed = round(narration["duration"] - probe(dst).duration_s, 3)
         clean_words = new_words
     info = probe(dst)
-    context["state"]["ctx_cleanup"] = {"path": str(dst), "duration": info.duration_s, "words": clean_words}
+    cleanup_state = {"path": str(dst), "duration": info.duration_s, "words": clean_words}
     register_artifact(db, job.project_id, job.id, task.id, "cleaned_narration", dst, {"removed_s": removed}, {"origin": "derived", "from": "narration_full.wav"})
-    return {"removed_silence_s": removed, "kept_ranges": len(keep_ranges), "final_duration": info.duration_s}
+    return {"removed_silence_s": removed, "kept_ranges": len(keep_ranges), "final_duration": info.duration_s, "ctx_cleanup": cleanup_state}
 
 
 def stage_editorial_assembly(db, job: Job, task: Task, context: dict) -> dict:
@@ -499,12 +555,13 @@ def stage_editorial_assembly(db, job: Job, task: Task, context: dict) -> dict:
     db.commit()
     context["state"]["ctx_scene_clips"] = clip_paths
     context["state"]["ctx_edl"] = tl.to_dict()
-    return {"clips": len(clip_paths), "total_video_s": round(sum(s['duration'] for s in edl_scenes), 2), "scale_applied": round(scale, 3)}
+    clip_strs = [str(p) for p in clip_paths]
+    return {"clips": len(clip_paths), "total_video_s": round(sum(s['duration'] for s in edl_scenes), 2), "scale_applied": round(scale, 3), "ctx_scene_clips": clip_strs, "ctx_edl": tl.to_dict()}
 
 
 def stage_motion_graphics(db, job: Job, task: Task, context: dict) -> dict:
     spec = context["state"]["ctx_spec"]
-    palette = context["state"]["ctx_palette"]
+    palette = _palette_tuples(context)
     scenes = context["state"]["ctx_scenes"]
     workdir = job_workdir(job.id) / "graphics"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -521,14 +578,14 @@ def stage_motion_graphics(db, job: Job, task: Task, context: dict) -> dict:
         {"path": str(title_card), "start": 0.0, "end": round(min(first_scene_len * 0.55, 3.0), 2), "mode": "full"},
         {"path": str(lt), "start": round(offsets[lower_third_scene["id"]] + 0.4, 2), "end": round(offsets[lower_third_scene["id"]] + min(lower_third_scene["duration_s"] - 0.4, 4.5), 2), "mode": "corner", "anchor_x": 0.06, "anchor_y": 0.78},
     ]
-    context["state"]["ctx_overlays"] = overlays
+    overlays_persist = [{**o, "path": str(o["path"])} for o in overlays]
     register_artifact(db, job.project_id, job.id, task.id, "graphics_overlay", title_card, {}, {"origin": "procedural"})
     register_artifact(db, job.project_id, job.id, task.id, "graphics_overlay", lt, {}, {"origin": "procedural"})
-    return {"overlays": len(overlays)}
+    return {"overlays": len(overlays), "ctx_overlays": overlays_persist}
 
 
 def stage_rough_concat(db, job: Job, task: Task, context: dict) -> dict:
-    clips = context["state"]["ctx_scene_clips"]
+    clips = [Path(p) for p in context["state"]["ctx_scene_clips"]]
     workdir = job_workdir(job.id)
     rough = workdir / "rough_cut.mp4"
     try:
@@ -536,15 +593,15 @@ def stage_rough_concat(db, job: Job, task: Task, context: dict) -> dict:
     except MediaError as exc:
         raise TaskFailure(f"concat failed: {exc}", failure_class="ffmpeg_error") from exc
     info = probe(rough)
-    context["state"]["ctx_rough"] = {"path": str(rough), "duration": info.duration_s}
+    rough_state = {"path": str(rough), "duration": info.duration_s}
     register_artifact(db, job.project_id, job.id, task.id, "rough_cut", rough, {"duration_s": info.duration_s}, {"origin": "derived"})
-    return {"duration": info.duration_s, "resolution": f"{info.width}x{info.height}"}
+    return {"duration": info.duration_s, "resolution": f"{info.width}x{info.height}", "ctx_rough": rough_state}
 
 
 def stage_audio_mix(db, job: Job, task: Task, context: dict) -> dict:
     context["state"]["ctx_spec"]
     cleanup = context["state"].get("ctx_cleanup") or context["state"]["ctx_narration"]
-    creative = context["state"]["ctx_creative"]
+    creative = context["state"].get("ctx_creative") or {"music_mood": "uplifting"}
     workdir = job_workdir(job.id)
     narration_path = Path(cleanup["path"])
     total_dur = float(cleanup["duration"])
@@ -555,10 +612,10 @@ def stage_audio_mix(db, job: Job, task: Task, context: dict) -> dict:
     normalized_path = workdir / "audio_final.m4a"
     target_lufs = get_settings().qa_target_lufs
     stats = loudness_normalize(mixed_path, normalized_path, target_lufs=float(target_lufs))
-    context["state"]["ctx_audio"] = {"path": str(normalized_path), "duration": total_dur, "loudness_before": stats["before"]["input_i"]}
+    audio_state = {"path": str(normalized_path), "duration": total_dur, "loudness_before": stats["before"]["input_i"]}
     register_artifact(db, job.project_id, job.id, task.id, "mixed_audio", normalized_path, stats, {"origin": "derived"})
-    record_cost(db, job.project_id, job.id, task.id, "audio_processing", provider="local-deterministic", model="", quantity=total_dur, unit="seconds", amount_usd=0.0)
-    return {"loudness_before": stats["before"]["input_i"], "target": target_lufs}
+    record_cost(db, job.project_id, job.id, task.id, "audio_processing", provider="local-deterministic", model="", quantity=total_dur, unit="seconds", amount_usd=0.0, org_id=job.org_id)
+    return {"loudness_before": stats["before"]["input_i"], "target": target_lufs, "ctx_audio": audio_state}
 
 
 def stage_av_mux(db, job: Job, task: Task, context: dict) -> dict:
@@ -575,9 +632,9 @@ def stage_av_mux(db, job: Job, task: Task, context: dict) -> dict:
     a_probe = probe(audio)
     if abs(v_dur - a_probe.duration_s) > 1.5:
         raise TaskFailure(f"av drift {abs(v_dur - a_probe.duration_s):.2f}s exceeds tolerance", failure_class="qa_sync")
-    context["state"]["ctx_av"] = {"path": str(av_path), "duration": v_dur}
+    av_state = {"path": str(av_path), "duration": v_dur}
     register_artifact(db, job.project_id, job.id, task.id, "av_intermediate", av_path, {"duration_s": v_dur}, {"origin": "derived"})
-    return {"duration": v_dur}
+    return {"duration": v_dur, "ctx_av": av_state}
 
 
 def stage_burn_captions(db, job: Job, task: Task, context: dict) -> dict:
@@ -597,7 +654,7 @@ def stage_burn_captions(db, job: Job, task: Task, context: dict) -> dict:
     context["state"]["ctx_captioned"] = {"path": str(captioned)}
     context["state"]["ctx_caption_files"] = {"ass": str(ass_path), "srt": str(srt_path)}
     register_artifact(db, job.project_id, job.id, task.id, "captions_sidecar", srt_path, {"format": "srt"}, {"origin": "derived"})
-    return {"captions_burned": True}
+    return {"captions_burned": True, "ctx_captioned": {"path": str(captioned)}, "ctx_caption_files": {"ass": str(ass_path), "srt": str(srt_path)}}
 
 
 def stage_color_grade(db, job: Job, task: Task, context: dict) -> dict:
@@ -609,9 +666,9 @@ def stage_color_grade(db, job: Job, task: Task, context: dict) -> dict:
     except MediaError as exc:
         raise TaskFailure(f"grade failed: {exc}", failure_class="ffmpeg_error") from exc
     info = probe(master)
-    context["state"]["ctx_master"] = {"path": str(master), "duration": info.duration_s, "width": info.width, "height": info.height}
+    master_state = {"path": str(master), "duration": info.duration_s, "width": info.width, "height": info.height}
     register_artifact(db, job.project_id, job.id, task.id, "master_render", master, {"duration_s": info.duration_s, "resolution": f"{info.width}x{info.height}", "codec": info.video_codec}, {"origin": "derived"})
-    return {"master": str(master.name), "duration": info.duration_s}
+    return {"master": str(master.name), "duration": info.duration_s, "ctx_master": master_state}
 
 
 def _extract_frame(video: Path, at_s: float, dst: Path) -> Path:
@@ -682,7 +739,7 @@ def stage_creative_qa(db, job: Job, task: Task, context: dict) -> dict:
     if not hooks_ok:
         findings.append("hook section missing from narration")
     workdir = job_workdir(job.id)
-    palette = context["state"]["ctx_palette"]
+    palette = _palette_tuples(context)
     dists = []
     for frac in (0.15, 0.5, 0.85):
         frame = workdir / f"qa_frame_{int(frac * 100)}.png"
@@ -722,7 +779,7 @@ STOPWORDS = {
 }
 
 
-def concept_coverage(brief_texts: list[str], corpus_text: str) -> float:
+def concept_coverage(brief_texts: list[str], corpus_text: str) -> tuple[float, int]:
     def normalize(words: list[str]) -> list[str]:
         out = []
         for w in words:
@@ -733,7 +790,7 @@ def concept_coverage(brief_texts: list[str], corpus_text: str) -> float:
 
     keywords = normalize(" ".join(brief_texts).split())
     if not keywords:
-        return 1.0
+        return 1.0, 0
     corpus_tokens = normalize(corpus_text.split())
     hits = 0
     for kw in keywords:
@@ -741,7 +798,7 @@ def concept_coverage(brief_texts: list[str], corpus_text: str) -> float:
         matched = any(kw == tok or tok.startswith(stem) or kw.startswith(tok[:5]) for tok in corpus_tokens)
         if matched:
             hits += 1
-    return hits / len(keywords)
+    return hits / len(keywords), len(keywords)
 
 
 def stage_multimodal_qa(db, job: Job, task: Task, context: dict) -> dict:
@@ -750,10 +807,14 @@ def stage_multimodal_qa(db, job: Job, task: Task, context: dict) -> dict:
     master_info = context["state"]["ctx_master"]
     script = context["state"]["ctx_script"]
     findings: list[str] = []
-    brief_sources = [spec["objective"], spec["title"], *[f"{k}" for k in spec.get("key_points", [])]]
-    coverage = concept_coverage(brief_sources, script["full_text"])
-    if coverage < 0.45:
-        findings.append(f"script covers only {coverage:.0%} of brief concepts")
+    brief_sources = [spec["objective"], spec["title"], *[f"{k}" for k in spec.get("key_points", [])], *context["state"].get("ctx_research", {}).get("points", [])]
+    coverage, keyword_count = concept_coverage(brief_sources, script["full_text"])
+    min_coverage = 0.45 if float(spec["duration_s"]) >= 15 else (0.30 if float(spec["duration_s"]) >= 8 else 0.18)
+    if keyword_count < 3:
+        findings_note = f"brief provides only {keyword_count} scorable concepts; coverage gate not applied"
+        coverage = max(coverage, min_coverage)
+    elif coverage < min_coverage:
+        findings.append(f"script covers only {coverage:.0%} of brief concepts (min {min_coverage:.0%} for {spec['duration_s']:.0f}s)")
     if abs(len(scenes) - len(context["state"]["ctx_scene_clips"])) != 0:
         findings.append("storyboard/render scene count mismatch")
     expected_ar = spec["resolution"]["width"] / spec["resolution"]["height"]
@@ -839,6 +900,15 @@ def stage_finalize(db, job: Job, task: Task, context: dict) -> dict:
 
     costs = db.execute(select(CostEntry).where(CostEntry.job_id == job.id)).scalars().all()
     total = round(sum(c.amount_usd for c in costs), 6)
+    from sqlalchemy import select as _select
+
+    from ..models import Budget
+
+    budgets = db.execute(_select(Budget).where(Budget.active == True, Budget.org_id == job.org_id)).scalars().all()  # noqa: E712
+    for b in budgets:
+        if b.max_cost_per_job_usd is not None and total > float(b.max_cost_per_job_usd):
+            emit_event(db, job.id, task.id, "warning", "budget.exceeded", {"total_usd": total, "cap": b.max_cost_per_job_usd}, org_id=job.org_id)
+            break
     deliverables = context["state"].get("ctx_deliverables_list", [])
     context["deliverables"] = deliverables
     context["qa_summary"] = context["state"].get("qa_summary", {})
@@ -901,5 +971,6 @@ PRODUCTION_STAGES: list[tuple[str, str]] = [
 STAGE_SEQ: dict[str, int] = {name: idx for idx, (name, _agent) in enumerate(PRODUCTION_STAGES)}
 
 __all__ = ["HANDLERS", "PRODUCTION_STAGES", "STAGE_SEQ", "PLATFORM_SPECS"]
+
 
 

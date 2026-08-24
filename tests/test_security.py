@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,12 +29,19 @@ def _make_project(client):
     return client.post("/v1/projects", json={"name": "SecP", "brief": brief}, headers=auth()).json()["id"]
 
 
-def test_upload_neutralizes_path_like_filename(client):
+def test_upload_neutralizes_path_like_filename(client, tmp_path):
     pid = _make_project(client)
-    payload = io.BytesIO(b"RIFFxxxxWAVE")
+    from agency.capabilities.media import FFMPEG_BIN
+
+    real_wav = tmp_path / "real.wav"
+    subprocess.run(
+        [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=0.4", str(real_wav)],
+        check=True,
+        capture_output=True,
+    )
     r = client.post(
         f"/v1/projects/{pid}/assets?license_state=owned",
-        files={"file": ("../../evil.wav", payload, "audio/wav")},
+        files={"file": ("../../evil.wav", open(real_wav, "rb"), "audio/wav")},
         headers=auth(),
     )
     assert r.status_code == 200

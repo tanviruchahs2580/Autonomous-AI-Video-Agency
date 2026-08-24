@@ -129,11 +129,19 @@ def test_build_ass_and_srt(tmp_path):
 def test_concept_coverage_scoring():
     brief = ["Increase deployment speed with zero downtime rollouts and instant rollback safety"]
     corpus = "CloudFlow cuts deployment time. Zero downtime rollouts. One click rollback keeps production safe."
-    score = concept_coverage(brief, corpus)
-    assert score >= 0.6
+    score, kw_count = concept_coverage(brief, corpus)
+    assert score >= 0.6 and kw_count >= 5
 
 
 def test_concept_coverage_ignores_stopwords():
     brief = ["The team that will ship this with the new platform"]
     corpus = "team ships new platform"
-    assert concept_coverage(brief, corpus) >= 0.5
+    score, _ = concept_coverage(brief, corpus)
+    assert score >= 0.5
+
+
+def test_concept_coverage_low_keyword_brief():
+    brief = ["claim debug"]
+    corpus = "Meet C. a. b. Ready? Go."
+    score, kw_count = concept_coverage(brief, corpus)
+    assert kw_count < 3

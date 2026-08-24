@@ -1,0 +1,33 @@
+{
+  "started": "2026-08-24T21:37:56.566835+00:00",
+  "tenants": 10,
+  "api_layer": {
+    "projects_created": 20,
+    "jobs_created": 100,
+    "cross_tenant_blocked": 40,
+    "permission_attacks_blocked": 10,
+    "duplicate_jobs_deduped": 40,
+    "violations": []
+  },
+  "task_failures": {},
+  "renders": {
+    "attempted": 15,
+    "completed": 15,
+    "failed": 0,
+    "errors_sample": []
+  },
+  "jobs_by_tenant": {
+    "tenant-01": 2,
+    "tenant-02": 2,
+    "tenant-03": 2,
+    "tenant-04": 2,
+    "tenant-05": 2,
+    "tenant-06": 1,
+    "tenant-07": 1,
+    "tenant-08": 1,
+    "tenant-09": 1,
+    "tenant-10": 1
+  },
+  "passed": true,
+  "finished": "2026-08-24T21:38:35.389499+00:00"
+}

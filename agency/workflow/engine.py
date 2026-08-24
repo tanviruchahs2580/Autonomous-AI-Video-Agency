@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -12,8 +12,16 @@ from sqlalchemy.orm import Session
 
 from ..models import Event, Job, Task, now_iso
 from ..observability import emit_event
+from ..webhooks import dispatch_event as _dispatch_event
 
 logger = logging.getLogger("agency.workflow")
+
+
+def notify_webhooks(db: Session, org_id: str | None, event_type: str, data: dict) -> None:
+    try:
+        _dispatch_event(db, org_id, event_type, data)
+    except Exception:
+        logger.exception("webhook dispatch failed")
 
 JOB_STATES = ("queued", "running", "paused", "retrying", "failed", "cancelled", "completed", "awaiting_approval")
 TASK_STATES = ("pending", "running", "done", "failed", "skipped")
@@ -30,6 +38,7 @@ def create_job(
     idempotency_key: str | None = None,
     max_attempts: int = 3,
     priority: int = 5,
+    org_id: str | None = None,
 ) -> tuple[Job, bool]:
     if idempotency_key:
         existing = db.execute(select(Job).where(Job.idempotency_key == idempotency_key)).scalar_one_or_none()
@@ -37,6 +46,7 @@ def create_job(
             return existing, False
     job = Job(
         project_id=project_id,
+        org_id=org_id,
         type=job_type,
         payload=payload,
         idempotency_key=idempotency_key,
@@ -46,7 +56,8 @@ def create_job(
     )
     db.add(job)
     db.commit()
-    emit_event(db, job.id, None, "info", "job.created", {"type": job_type})
+    emit_event(db, job.id, None, "info", "job.created", {"type": job_type}, org_id=job.org_id)
+    notify_webhooks(db, org_id, "job.created", {"job_id": job.id, "type": job_type})
     return job, True
 
 
@@ -73,7 +84,7 @@ def claim_job(db: Session, job_id: str, worker_id: str) -> Job | None:
             t.state = "failed"
             t.error = "rejected by human approver"
     db.commit()
-    emit_event(db, job.id, None, "info", "job.claimed", {"worker": worker_id, "attempt": job.attempts})
+    emit_event(db, job.id, None, "info", "job.claimed", {"worker": worker_id, "attempt": job.attempts}, org_id=job.org_id)
     logger.info("claimed job %s by %s", job.id, worker_id, extra={"job_id": job.id})
     return job
 
@@ -108,7 +119,7 @@ def claim_next_job(db: Session, worker_id: str) -> Job | None:
                 t.state = "failed"
                 t.error = "rejected by human approver"
         db.commit()
-        emit_event(db, job.id, None, "info", "job.claimed", {"worker": worker_id, "attempt": job.attempts})
+        emit_event(db, job.id, None, "info", "job.claimed", {"worker": worker_id, "attempt": job.attempts}, org_id=job.org_id)
         logger.info("claimed job %s by %s", job.id, worker_id, extra={"job_id": job.id})
         return job
     return None
@@ -146,10 +157,13 @@ class WorkflowEngine:
             raise ValueError(f"unknown job type {job_type}")
         return [(name, agent) for name, agent in PRODUCTION_STAGES]
 
-    def execute_job(self, db: Session, job: Job, worker_id: str = "inline") -> Job:
+    def execute_job(self, db: Session, job: Job | None, worker_id: str = "inline") -> Job:
+        if job is None:
+            raise ValueError("execute_job called with no job")
         try:
             plan = self.plan_job_tasks(job.type, job.payload)
             context: dict[str, Any] = {"job": job, "payload": job.payload, "artifacts": {}, "state": {}}
+            self._restore_context_state(db, job, context)
             seq = 0
             while seq < len(plan):
                 name, agent = plan[seq]
@@ -174,6 +188,21 @@ class WorkflowEngine:
             logger.exception("job crashed", extra={"job_id": job.id})
             self._fail_job(db, job, f"unexpected error: {exc}")
         return job
+
+    def _restore_context_state(self, db: Session, job: Job, context: dict) -> None:
+        done_tasks = db.execute(
+            select(Task).where(Task.job_id == job.id, Task.state == "done").order_by(Task.seq, Task.attempt)
+        ).scalars().all()
+        merged: dict[str, Any] = {}
+        for t in done_tasks:
+            try:
+                out = t.output
+            except Exception:
+                logger.warning("could not deserialize output of task %s", t.id, exc_info=True)
+                continue
+            if isinstance(out, dict):
+                merged.update(out)
+        context["state"].update(merged)
 
     def _run_single_task(
         self,
@@ -219,17 +248,17 @@ class WorkflowEngine:
                 task.state = "awaiting_approval"
             else:
                 task.state = "done"
-            emit_event(db, job.id, task.id, "info", f"task.{task.state}", {"stage": name, "agent": agent})
+            emit_event(db, job.id, task.id, "info", f"task.{task.state}", {"stage": name, "agent": agent}, org_id=job.org_id)
         except TaskFailure as exc:
             task.error = str(exc)
             task.failure_class = exc.failure_class
             task.state = "failed"
-            emit_event(db, job.id, task.id, "error", "task.failed", {"stage": name, "class": exc.failure_class, "error": str(exc)})
+            emit_event(db, job.id, task.id, "error", "task.failed", {"stage": name, "class": exc.failure_class, "error": str(exc)}, org_id=job.org_id)
         except Exception as exc:
             task.error = f"{type(exc).__name__}: {exc}"
             task.failure_class = "crash"
             task.state = "failed"
-            emit_event(db, job.id, task.id, "error", "task.crashed", {"stage": name, "error": task.error})
+            emit_event(db, job.id, task.id, "error", "task.crashed", {"stage": name, "error": task.error}, org_id=job.org_id)
         finally:
             task.duration_ms = int((time.monotonic() - started) * 1000)
             task.finished_at = now_iso()
@@ -257,7 +286,7 @@ class WorkflowEngine:
         repair = Repair(job_id=job.id, failure_class=failure_class, stage=failed_task.name, plan_json=json.dumps(plan, default=str), applied=False)
         db.add(repair)
         db.commit()
-        emit_event(db, job.id, failed_task.id, "warning", "repair.planned", plan)
+        emit_event(db, job.id, failed_task.id, "warning", "repair.planned", plan, org_id=job.org_id)
 
         action = plan["action"]
         if action == "retry_stage":
@@ -266,6 +295,7 @@ class WorkflowEngine:
             repair.result = "stage queued for retry"
             db.commit()
             emit_event(db, job.id, failed_task.id, "info", "repair.retry_stage", {"stage": failed_task.name})
+            notify_webhooks(db, job.org_id, "job.repaired", {"job_id": job.id, "stage": failed_task.name, "mode": "retry"})
             return True, None
         if action == "pipeline_repair" and plan.get("strategy"):
             strategy: dict = plan["strategy"]
@@ -281,7 +311,7 @@ class WorkflowEngine:
             repair.applied = True
             repair.result = f"pipeline restarted from seq {reset_from}"
             db.commit()
-            emit_event(db, job.id, None, "info", "repair.pipeline_restart", {"from_seq": reset_from})
+            emit_event(db, job.id, None, "info", "repair.pipeline_restart", {"from_seq": reset_from}, org_id=job.org_id)
             return True, reset_from
         if action == "escalate_human":
             repair.applied = True
@@ -299,7 +329,8 @@ class WorkflowEngine:
         job.state = "awaiting_approval"
         job.heartbeat_at = now_iso()
         db.commit()
-        emit_event(db, job.id, task.id, "warning", "job.awaiting_approval", {"stage": task.name})
+        emit_event(db, job.id, task.id, "warning", "job.awaiting_approval", {"stage": task.name}, org_id=job.org_id)
+        notify_webhooks(db, job.org_id, "approval.required", {"job_id": job.id, "stage": task.name})
 
     def _pause_for_approval_reason(self, db: Session, job: Job, reason: str) -> None:
         from ..models import Approval
@@ -314,7 +345,8 @@ class WorkflowEngine:
         job.finished_at = now_iso() if job.state == "failed" else None
         job.heartbeat_at = None
         db.commit()
-        emit_event(db, job.id, None, "error", "job." + ("retrying" if job.state == "retrying" else "failed"), {"error": error[:500]})
+        emit_event(db, job.id, None, "error", "job." + ("retrying" if job.state == "retrying" else "failed"), {"error": error[:500]}, org_id=job.org_id)
+        notify_webhooks(db, job.org_id, "job.failed", {"job_id": job.id, "error": error[:300], "state": job.state})
         logger.error("job %s %s: %s", job.id, job.state, error, extra={"job_id": job.id})
 
     def _complete_job(self, db: Session, job: Job, context: dict) -> None:
@@ -331,7 +363,8 @@ class WorkflowEngine:
         job.finished_at = now_iso()
         job.error = None
         db.commit()
-        emit_event(db, job.id, None, "info", "job.completed", {"deliverables": len(deliverables)})
+        emit_event(db, job.id, None, "info", "job.completed", {"deliverables": len(deliverables)}, org_id=job.org_id)
+        notify_webhooks(db, job.org_id, "job.completed", {"job_id": job.id, "deliverables": len(deliverables)})
 
 
 def _repair_strategy_for(failure_class: str) -> dict | None:
@@ -345,5 +378,7 @@ def _repair_strategy_for(failure_class: str) -> dict | None:
         "generic": {"reset_from_seq": 0},
     }
     return strategies.get(failure_class)
+
+
 
 

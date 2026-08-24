@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 0.5
     ffmpeg_timeout: int = 900
 
+    cors_origins: str = ""
+    media_max_duration_s: float = 7200.0
+    media_max_width: int = 7680
+    media_max_height: int = 4320
+    allowed_video_codecs: str = "h264,hevc,vp9,av1"
+    allowed_audio_codecs: str = "aac,mp3,opus,flac,pcm_s16le"
+    upload_probe_enabled: bool = True
+    webhook_max_attempts: int = 5
+    default_job_cost_estimate_usd: float = 0.05
+
 
 @lru_cache
 def get_settings() -> Settings:

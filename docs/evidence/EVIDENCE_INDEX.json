@@ -1,0 +1,10 @@
+{
+  "summary": "Executed validation evidence collected on this host (Windows, 8 CPUs, SQLite default DB, FFmpeg 9.0, Python 3.12).",
+  "baseline": {"tests": "51 passed", "ruff": "clean", "mypy": "clean", "bandit": "no issues"},
+  "final_suite": {"tests": "64 passed", "notes": "includes tenancy isolation, webhooks, budgets, metrics, migration downgrade, chaos recovery"},
+  "load_test": {"file": "docs/evidence/load_test.json", "api": {"requests": 300, "concurrency": 30, "p50_ms": 17.9, "p95_ms": 164.8, "errors_5xx": 0}, "renders_run_A": {"jobs": 24, "workers": 6, "completed": 22, "failed": 2, "wall_s": 50.5, "throughput_per_min": 26.1}},
+  "soak_test": {"file": "docs/evidence/soak_test.json", "duration_minutes": 3.0, "jobs_completed": 63, "failures": 0, "rss_growth_pct": 0.1},
+  "dr_drill": {"file": "docs/evidence/dr_drill.json", "passed": true, "backup_seconds": 0.256, "restore_rto_s": 0.087, "rpo_s": 0.113, "sha256_match": true},
+  "enterprise_sim": {"file": "docs/evidence/enterprise_sim.json", "tenants": 10, "projects": 20, "queued_jobs": 100, "cross_tenant_blocked": 40, "permission_attacks_blocked": 10, "duplicates_deduped": 40, "renders_completed": "15/15", "violations": 0},
+  "production_render": {"master": "data/production/jobs/527c4735ae994bdeaaa827b233c1f1ad/master.mp4", "spec": "1280x720@30 H.264/AAC 24.0s stereo", "loudness_lufs": -16.4, "true_peak_dbtp": -1.83, "decode": "PASS"}
+}

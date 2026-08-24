@@ -1,0 +1,11 @@
+{
+  "duration_minutes": 3.0,
+  "jobs_completed": 63,
+  "failures": [],
+  "failure_count": 0,
+  "rss_first_mb": 82.0,
+  "rss_last_mb": 82.1,
+  "rss_growth_pct": 0.1,
+  "leak_signal": false,
+  "finished": "2026-08-24T21:16:04.062281+00:00"
+}

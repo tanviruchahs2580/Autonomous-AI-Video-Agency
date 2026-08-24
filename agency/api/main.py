@@ -1,52 +1,102 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
+import secrets
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy import text as sqltext
 
 from agency import __version__
 from agency.agents.registry import get_registry
+from agency.capabilities.media import MediaError
+from agency.capabilities.media import probe as media_probe
 from agency.capabilities.router import check_provider_health
 from agency.config import ensure_dirs, get_settings
 from agency.db import get_engine, init_db, session_scope
+from agency.metrics import METRICS
 from agency.models import (
     Approval,
     Artifact,
     Asset,
+    Budget,
     CostEntry,
     Deliverable,
     Event,
     Job,
+    Org,
     Project,
     QAReport,
     Repair,
     Task,
+    Tenant,
     User,
+    Webhook,
     now_iso,
 )
 from agency.observability import audit, new_request_id
 from agency.security import (
-    ROLE_PERMISSIONS,
     RateLimiter,
+    assert_public_url,
     generate_api_key,
     hash_api_key,
+    permissions_for,
+    resolve_role,
     safe_join,
     validate_extension,
     verify_api_key,
 )
 from agency.storage import sha256_file
-from agency.workflow.engine import WorkflowEngine, claim_job, create_job
+from agency.webhooks import WEBHOOK_EVENT_TYPES, check_budget, dispatch_event, process_pending_deliveries
+from agency.workflow.engine import WorkflowEngine, claim_job, create_job, notify_webhooks
 
 logger = logging.getLogger("agency.api")
 
 app = FastAPI(title="Autonomous AI Video Agency", version=__version__, docs_url="/docs")
 _rate = RateLimiter(get_settings().rate_limit_per_min)
+
+_settings_boot = get_settings()
+if _settings_boot.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in _settings_boot.cors_origins.split(",") if o.strip()],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["X-API-Key", "Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    rid = new_request_id()
+    request.state.request_id = rid
+    request.state.tenant_id = None
+    import time as _time
+
+    started = _time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        METRICS.inc("agency_api_requests_total", {"status": "500"})
+        raise
+    duration = _time.monotonic() - started
+    status = response.status_code
+    path_group = request.scope.get("route").path if request.scope.get("route") else request.url.path
+    METRICS.inc("agency_api_requests_total", {"method": request.method, "path": path_group, "status": str(status)})
+    METRICS.observe("agency_api_request_latency_seconds", duration)
+    METRICS.inc("agency_api_errors_total" if status >= 500 else "agency_client_errors_total" if status >= 400 else "agency_api_ok_total", {"method": request.method})
+    response.headers["X-Request-ID"] = rid
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.on_event("startup")
@@ -79,10 +129,17 @@ def _authenticate(request: Request, permission: str, x_api_key: str | None) -> U
                 return None
             audit(db, "anonymous", "auth.denied", "request", request_id, {"reason": "invalid key"})
             raise HTTPException(status_code=401, detail="invalid API key", headers={"X-Request-ID": request_id})
-        perms = ROLE_PERMISSIONS.get(user.role, set())
+        if user.api_key_revoked_at is not None:
+            audit(db, user.email, "auth.denied", "request", request_id, {"reason": "revoked key"}, org_id=user.org_id)
+            raise HTTPException(status_code=401, detail="API key revoked", headers={"X-Request-ID": request_id})
+        if user.api_key_expires_at is not None and user.api_key_expires_at < datetime.now(UTC).isoformat():
+            audit(db, user.email, "auth.denied", "request", request_id, {"reason": "expired key"}, org_id=user.org_id)
+            raise HTTPException(status_code=401, detail="API key expired", headers={"X-Request-ID": request_id})
+        perms = permissions_for(user.role)
         if permission not in perms:
-            audit(db, user.email, "authz.denied", "request", request_id, {"permission": permission})
+            audit(db, user.email, "authz.denied", "request", request_id, {"permission": permission}, org_id=user.org_id)
             raise HTTPException(status_code=403, detail=f"role {user.role} lacks {permission}", headers={"X-Request-ID": request_id})
+        request.state.tenant_id = user.org_id
         db.expunge(user)
         return user
 
@@ -98,6 +155,52 @@ auth_read = _auth_factory("read")
 auth_write = _auth_factory("write")
 auth_approve = _auth_factory("approve")
 auth_admin = _auth_factory("admin")
+auth_audit = _auth_factory("audit")
+
+
+def tenant_of(user: User | None) -> str:
+    return user.org_id if user is not None and user.org_id else "default"
+
+
+def actor_name(user: User | None) -> str:
+    return user.email if user is not None else "dev-key"
+
+
+async def _read_upload_and_validate(file: UploadFile, dest: Path) -> dict:
+    settings = get_settings()
+    ext = validate_extension(file.filename or "")
+    data = await file.read()
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    if len(data) <= 0:
+        raise ValueError("empty file")
+    if len(data) > max_bytes:
+        raise ValueError(f"file exceeds maximum allowed size of {settings.max_upload_mb} MB")
+    dest.write_bytes(data)
+    from agency.security import sniff_kind
+
+    head = data[:64]
+    kind = sniff_kind(head)
+    media_exts = {".mp4", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".m4a", ".png", ".jpg", ".jpeg"}
+    if ext in media_exts and kind is None:
+        raise ValueError("file content does not match a known safe media signature")
+    meta: dict = {"size": len(data), "sniffed_kind": kind}
+    if settings.upload_probe_enabled and ext in {".mp4", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".m4a"}:
+        try:
+            info = media_probe(dest)
+        except MediaError as exc:
+            raise ValueError(f"media probe failed: {exc}") from exc
+        if info.duration_s > settings.media_max_duration_s:
+            raise ValueError(f"media duration {info.duration_s:.0f}s exceeds cap {settings.media_max_duration_s}s")
+        if (info.width or 0) > settings.media_max_width or (info.height or 0) > settings.media_max_height:
+            raise ValueError("media resolution exceeds platform cap")
+        allowed_v = {c.strip() for c in settings.allowed_video_codecs.split(",")}
+        allowed_a = {c.strip() for c in settings.allowed_audio_codecs.split(",")}
+        if info.video_codec and info.video_codec not in allowed_v:
+            raise ValueError(f"video codec {info.video_codec} not allowed")
+        if info.audio_codec and info.audio_codec not in allowed_a:
+            raise ValueError(f"audio codec {info.audio_codec} not allowed")
+        meta["probe"] = {"duration_s": round(info.duration_s, 2), "resolution": f"{info.width}x{info.height}", "video_codec": info.video_codec, "audio_codec": info.audio_codec}
+    return meta
 
 
 class BriefModel(BaseModel):
@@ -126,23 +229,26 @@ class DecisionModel(BaseModel):
     note: str = Field(default="", max_length=500)
 
 
-class ApiKeyIssue(BaseModel):
-    email: str
-    role: str = Field(default="viewer", pattern="^(viewer|editor|approver|admin)$")
-    org_name: str = "default"
-
-
 def error(status: int, code: str, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "detail": detail}})
 
 
-@app.middleware("http")
-async def request_context(request: Request, call_next):
-    rid = new_request_id()
-    request.state.request_id = rid
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = rid
-    return response
+class ApiKeyIssue(BaseModel):
+    email: str
+    role: str = Field(default="client", pattern="^(owner|admin|producer|editor|reviewer|client|auditor|service_account|viewer|approver)$")
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class WebhookCreate(BaseModel):
+    url: str = Field(min_length=8, max_length=500)
+    events: list[str] = Field(default_factory=list, max_length=10)
+
+
+class BudgetCreate(BaseModel):
+    project_id: str | None = None
+    max_cost_per_job_usd: float | None = Field(default=None, ge=0)
+    daily_limit_usd: float | None = Field(default=None, ge=0)
+    monthly_limit_usd: float | None = Field(default=None, ge=0)
 
 
 @app.get("/health/live")
@@ -160,55 +266,92 @@ def readiness():
         return JSONResponse(status_code=503, content={"status": "not_ready", "database": str(exc)[:200]})
 
 
-@app.post("/v1/users/key")
-def issue_key(body: ApiKeyIssue, _: None = Depends(auth_admin)):
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    admin_email: str = Field(min_length=3, max_length=200)
+
+
+@app.post("/v1/tenants")
+def create_tenant(body: TenantCreate, user=Depends(auth_admin)):
     raw = generate_api_key()
     with session_scope() as db:
-        org = db.execute(sqltext("SELECT id FROM organizations WHERE name=:n"), {"n": body.org_name}).first()
-        if org is None:
-            from agency.models import Org
+        existing_user = db.execute(select(User).where(User.email == body.admin_email)).scalar_one_or_none()
+        if existing_user is not None:
+            raise HTTPException(409, "email already exists")
+        from agency.models import uid
 
-            org_row = Org(name=body.org_name)
-            db.add(org_row)
-            db.commit()
-            org_id = org_row.id
-        else:
-            org_id = org[0]
-        existing = db.execute(select(User).where(User.email == body.email)).scalar_one_or_none()
-        if existing is not None:
-            existing.api_key_hash = hash_api_key(raw)
-            existing.role = body.role
-        else:
-            db.add(User(org_id=org_id, email=body.email, role=body.role, api_key_hash=hash_api_key(raw)))
+        tenant = Tenant(id=uid(), name=body.name)
+        db.add(tenant)
         db.commit()
-    return {"api_key": raw, "role": body.role}
+        db.add(Org(id=tenant.id, name=body.name))
+        db.add(User(org_id=tenant.id, email=body.admin_email, role="admin", api_key_hash=hash_api_key(raw)))
+        db.commit()
+        audit(db, actor_name(user), "tenant.created", "tenant", tenant.id, {"name": body.name}, org_id=tenant.id)
+        return {"tenant_id": tenant.id, "admin_api_key": raw}
+
+
+@app.post("/v1/users/key")
+def issue_key(body: ApiKeyIssue, user=Depends(auth_admin)):
+    raw = generate_api_key()
+    with session_scope() as db:
+        org_id = tenant_of(user)
+        existing = db.execute(select(User).where(User.email == body.email)).scalar_one_or_none()
+        expires_at = (
+            (datetime.now(UTC) + timedelta(days=body.expires_in_days)).isoformat() if body.expires_in_days else None
+        )
+        role = resolve_role(body.role)
+        if existing is not None:
+            if existing.org_id != org_id:
+                raise HTTPException(404, "user not found in your tenant")
+            existing.api_key_hash = hash_api_key(raw)
+            existing.role = role
+            existing.api_key_expires_at = expires_at
+            existing.api_key_revoked_at = None
+        else:
+            db.add(User(org_id=org_id, email=body.email, role=role, api_key_hash=hash_api_key(raw), api_key_expires_at=expires_at))
+        db.commit()
+        audit(db, actor_name(user), "key.issued", "user", body.email, {"role": role, "expires": bool(expires_at)}, org_id=org_id)
+    return {"api_key": raw, "role": role, "expires_at": expires_at}
+
+
+@app.delete("/v1/users/{email}/key")
+def revoke_key(email: str, user=Depends(auth_admin)):
+    with session_scope() as db:
+        target = db.execute(select(User).where(User.email == email, User.org_id == tenant_of(user))).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(404, "user not found in your tenant")
+        target.api_key_revoked_at = now_iso()
+        db.commit()
+        audit(db, actor_name(user), "key.revoked", "user", email, {}, org_id=tenant_of(user))
+    return {"email": email, "revoked": True}
 
 
 @app.post("/v1/projects")
 def create_project(body: ProjectCreate, request: Request, user=Depends(auth_write)):
     with session_scope() as db:
-        project = Project(name=body.name, brief_json=body.brief.model_dump_json(), status="created")
+        project = Project(name=body.name, brief_json=body.brief.model_dump_json(), status="created", org_id=tenant_of(user))
         db.add(project)
         db.commit()
-        with audit(db, user.email if user else "dev-key", "project.created", "project", project.id) as ctx:
-            ctx["name"] = body.name
+        with audit(db, actor_name(user), "project.created", "project", project.id, {"name": body.name}, org_id=tenant_of(user)):
+            pass
         return {"id": project.id, "name": project.name, "status": project.status}
 
 
 @app.get("/v1/projects")
 def list_projects(request: Request, page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        total = db.execute(select(func.count()).select_from(Project)).scalar() or 0
-        rows = db.execute(
-            select(Project).order_by(Project.created_at.desc()).limit(size).offset((page - 1) * size)
-        ).scalars().all()
+        base = select(Project).where(Project.org_id == tid)
+        total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+        rows = db.execute(base.order_by(Project.created_at.desc()).limit(size).offset((page - 1) * size)).scalars().all()
         return {"total": total, "page": page, "items": [{"id": p.id, "name": p.name, "status": p.status} for p in rows]}
 
 
 @app.get("/v1/projects/{project_id}")
 def get_project(project_id: str, user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        p = db.get(Project, project_id)
+        p = db.execute(select(Project).where(Project.id == project_id, Project.org_id == tid)).scalar_one_or_none()
         if p is None:
             raise HTTPException(404, "project not found")
         jobs = db.execute(select(Job).where(Job.project_id == project_id)).scalars().all()
@@ -224,8 +367,9 @@ def get_project(project_id: str, user=Depends(auth_read)):
 
 @app.delete("/v1/projects/{project_id}", status_code=204)
 def delete_project(project_id: str, request: Request, user=Depends(auth_write)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        p = db.get(Project, project_id)
+        p = db.execute(select(Project).where(Project.id == project_id, Project.org_id == tid)).scalar_one_or_none()
         if p is None:
             raise HTTPException(404, "project not found")
         active = db.execute(select(Job).where(Job.project_id == project_id, Job.state.in_(["queued", "running", "retrying"]))).scalars().first()
@@ -233,33 +377,42 @@ def delete_project(project_id: str, request: Request, user=Depends(auth_write)):
             raise HTTPException(409, "project has active jobs; cancel them first")
         db.delete(p)
         db.commit()
+        audit(db, actor_name(user), "project.deleted", "project", project_id, {}, org_id=tid)
     return PlainTextResponse("", status_code=204)
 
 
 @app.post("/v1/projects/{project_id}/jobs")
 def create_production_job(project_id: str, body: JobCreate, user=Depends(auth_write)):
+    settings = get_settings()
     with session_scope() as db:
-        p = db.get(Project, project_id)
+        p = db.execute(select(Project).where(Project.id == project_id, Project.org_id == tenant_of(user))).scalar_one_or_none()
         if p is None:
             raise HTTPException(404, "project not found")
+        estimate = settings.default_job_cost_estimate_usd
+        verdict = check_budget(db, tenant_of(user), project_id, estimate)
+        if not verdict["allowed"]:
+            audit(db, actor_name(user), "job.rejected_budget", "project", project_id, {"reason": verdict["reason"]}, org_id=tenant_of(user))
+            return error(402, "budget_exceeded", verdict["reason"])
         job, created = create_job(
             db,
             project_id=project_id,
             job_type="production",
             payload={"brief": p.brief},
             idempotency_key=body.idempotency_key,
+            org_id=tenant_of(user),
         )
         if not created:
             return {"id": job.id, "state": job.state, "deduplicated": True}
-        with audit(db, user.email if user else "dev-key", "job.created", "job", job.id):
+        with audit(db, actor_name(user), "job.created", "job", job.id, {}, org_id=tenant_of(user)):
             pass
         return {"id": job.id, "state": job.state, "deduplicated": False}
 
 
 @app.get("/v1/jobs/{job_id}")
 def get_job(job_id: str, user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        job = db.get(Job, job_id)
+        job = db.execute(select(Job).where(Job.id == job_id, Job.org_id == tid)).scalar_one_or_none()
         if job is None:
             raise HTTPException(404, "job not found")
         tasks = db.execute(select(Task).where(Task.job_id == job_id).order_by(Task.seq, Task.attempt)).scalars().all()
@@ -294,109 +447,73 @@ def list_jobs(state: str | None = None, page: int = 1, size: int = 20, user=Depe
         return {"total": total, "items": [{"id": j.id, "project_id": j.project_id, "state": j.state} for j in rows]}
 
 
-@app.post("/v1/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, user=Depends(auth_write)):
-    with session_scope() as db:
-        job = db.get(Job, job_id)
-        if job is None:
-            raise HTTPException(404, "job not found")
-        if job.state in ("completed", "failed", "cancelled"):
-            raise HTTPException(409, f"cannot cancel job in state {job.state}")
-        job.state = "cancelled"
-        job.finished_at = now_iso()
-        db.commit()
-        return {"id": job.id, "state": job.state}
-
-
-@app.post("/v1/approvals/{approval_or_job}/decision")
-def decide_approval(approval_or_job: str, body: DecisionModel, user=Depends(auth_approve)):
-    with session_scope() as db:
-        approval = db.get(Approval, approval_or_job)
-        if approval is None:
-            approval = db.execute(
-                select(Approval).where(Approval.job_id == approval_or_job, Approval.status == "requested").order_by(Approval.requested_at.desc())
-            ).scalars().first()
-        if approval is None:
-            raise HTTPException(404, "no pending approval found")
-        approval.status = body.decision
-        approval.note = body.note
-        approval.decided_at = now_iso()
-        approval.decided_by = user.email if user else "dev-key"
-        job = db.get(Job, approval.job_id)
-        if job is not None and job.state == "awaiting_approval":
-            if body.decision == "approved":
-                job.state = "queued"
-                job.heartbeat_at = None
-            else:
-                job.state = "failed"
-                job.error = f"rejected at approval gate: {body.note}"
-                job.finished_at = now_iso()
-        db.commit()
-        return {"approval_id": approval.id, "status": approval.status, "job_state": job.state if job else None}
-
-
 @app.post("/v1/projects/{project_id}/assets")
 async def upload_asset(project_id: str, request: Request, file: UploadFile = File(...), license_state: str = Query(default="unknown"), user=Depends(auth_write)):
     settings = get_settings()
     with session_scope() as db:
-        p = db.get(Project, project_id)
+        p = db.execute(select(Project).where(Project.id == project_id, Project.org_id == tenant_of(user))).scalar_one_or_none()
         if p is None:
             raise HTTPException(404, "project not found")
         try:
             ext = validate_extension(file.filename or "")
         except ValueError as exc:
             return error(415, "unsupported_media_type", str(exc))
-        data = await file.read()
-        if len(data) > settings.max_upload_mb * 1024 * 1024:
-            return error(413, "payload_too_large", f"max {settings.max_upload_mb} MB")
         assets_dir = safe_join(settings.data_dir, "uploads", project_id)
         assets_dir.mkdir(parents=True, exist_ok=True)
-        import secrets
-
         dest = assets_dir / f"{secrets.token_hex(8)}{ext}"
-        dest.write_bytes(data)
-        from agency.security import validate_upload
-
         try:
-            meta = validate_upload(dest, ext, settings.max_upload_mb * 1024 * 1024)
+            meta = await _read_upload_and_validate(file, dest)
         except ValueError as exc:
             dest.unlink(missing_ok=True)
             return error(415, "malicious_or_invalid_file", str(exc))
         asset = Asset(
             project_id=project_id,
+            org_id=tenant_of(user),
             kind="upload",
             source_uri=file.filename or dest.name,
             storage_key=str(dest),
             sha256=sha256_file(dest),
-            bytes=len(data),
+            bytes=meta["size"],
             license_state=license_state,
         )
         asset.license = {"state": license_state}
-        asset.meta = {"sniffed_kind": meta["sniffed_kind"]}
+        asset.meta = {"sniffed_kind": meta.get("sniffed_kind"), "probe": meta.get("probe")}
         db.add(asset)
         db.commit()
-        with audit(db, user.email if user else "dev-key", "asset.uploaded", "asset", asset.id):
+        with audit(db, actor_name(user), "asset.uploaded", "asset", asset.id, {"bytes": meta["size"]}, org_id=tenant_of(user)):
             pass
-        return {"id": asset.id, "sha256": asset.sha256, "license_state": asset.license_state, "bytes": asset.bytes}
+        return {"id": asset.id, "sha256": asset.sha256, "license_state": asset.license_state, "bytes": asset.bytes, "probe": meta.get("probe")}
 
 
 @app.get("/v1/artifacts/{artifact_id}/download")
 def download_artifact(artifact_id: str, user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
         art = db.get(Artifact, artifact_id)
-        if art is None:
+        if art is None or (art.project_id and not _project_in_tenant(db, art.project_id, tid)):
             raise HTTPException(404, "artifact not found")
         path = Path(art.storage_key)
         if not path.exists():
             raise HTTPException(410, "artifact file missing from storage")
+        with audit(db, actor_name(user), "artifact.downloaded", "artifact", artifact_id, {}, org_id=tid):
+            pass
         return FileResponse(path, filename=path.name)
+
+
+def _project_in_tenant(db, project_id: str, tenant: str) -> bool:
+    row = db.execute(sqltext("SELECT org_id FROM projects WHERE id=:p"), {"p": project_id}).first()
+    return bool(row) and (row[0] == tenant or (row[0] is None and tenant == "default"))
 
 
 @app.get("/v1/deliverables")
 def list_deliverables(project_id: str | None = None, page: int = 1, size: int = 50, user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        q = select(Deliverable).order_by(Deliverable.created_at.desc())
+        tenant_project_ids = [row[0] for row in db.execute(sqltext("SELECT id FROM projects WHERE org_id=:o OR org_id IS NULL"), {"o": tid}).fetchall()]
+        q = select(Deliverable).where(Deliverable.project_id.in_(tenant_project_ids or ["-"])).order_by(Deliverable.created_at.desc())
         if project_id:
+            if project_id not in tenant_project_ids:
+                return {"items": []}
             q = q.where(Deliverable.project_id == project_id)
         rows = db.execute(q.limit(size).offset((page - 1) * size)).scalars().all()
         return {
@@ -415,9 +532,10 @@ def list_deliverables(project_id: str | None = None, page: int = 1, size: int = 
 @app.get("/v1/deliverables/{deliverable_id}/download")
 def download_deliverable(deliverable_id: str, user=Depends(auth_read)):
     settings = get_settings()
+    tid = tenant_of(user)
     with session_scope() as db:
         d = db.get(Deliverable, deliverable_id)
-        if d is None:
+        if d is None or not _project_in_tenant(db, d.project_id, tid):
             raise HTTPException(404, "deliverable not found")
         try:
             path = safe_join(settings.data_dir, Path(d.storage_key))
@@ -425,16 +543,19 @@ def download_deliverable(deliverable_id: str, user=Depends(auth_read)):
             raise HTTPException(400, "invalid storage path") from None
         if not path.exists():
             raise HTTPException(410, "deliverable file missing from storage")
+        with audit(db, actor_name(user), "deliverable.downloaded", "deliverable", deliverable_id, {}, org_id=tid):
+            pass
         return FileResponse(path, filename=path.name, media_type="video/mp4")
 
 
 @app.post("/v1/jobs/{job_id}/run", response_model=None)
 def run_job_inline(job_id: str, user=Depends(auth_write)):
-    from .agents.stages import HANDLERS
+    from agency.agents.stages import HANDLERS
 
     engine = WorkflowEngine(handlers=HANDLERS)
+    tid = tenant_of(user)
     with session_scope() as db:
-        job = db.get(Job, job_id)
+        job = db.execute(select(Job).where(Job.id == job_id, Job.org_id == tid)).scalar_one_or_none()
         if job is None:
             raise HTTPException(404, "job not found")
         if job.state in ("running",):
@@ -445,16 +566,30 @@ def run_job_inline(job_id: str, user=Depends(auth_write)):
         claimed = claim_job(db, job_id=job.id, worker_id="inline-api")
         if claimed is None:
             return {"id": job.id, "state": "queued", "note": "job not claimable in current state"}
+        started = datetime.now(UTC)
         engine.execute_job(db, claimed, worker_id="inline-api")
         db.refresh(claimed)
+        METRICS.inc("agency_jobs_total", {"state": claimed.state})
+        METRICS.observe("agency_job_total_duration_seconds", (datetime.now(UTC) - started).total_seconds())
+        notify_webhooks_inline(db, claimed)
         return {"id": claimed.id, "state": claimed.state, "result": claimed.result}
+
+
+def notify_webhooks_inline(db, job: Job) -> None:
+    from agency.workflow.engine import notify_webhooks
+
+    if job.state == "completed":
+        notify_webhooks(db, job.org_id, "job.completed", {"job_id": job.id})
 
 
 @app.get("/v1/costs")
 def cost_summary(project_id: str | None = None, user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        q = select(CostEntry)
+        q = select(CostEntry).where(CostEntry.org_id == tid)
         if project_id:
+            if not _project_in_tenant(db, project_id, tid):
+                raise HTTPException(404, "project not found")
             q = q.where(CostEntry.project_id == project_id)
         rows = db.execute(q).scalars().all()
         by_category: dict[str, float] = {}
@@ -467,12 +602,165 @@ def cost_summary(project_id: str | None = None, user=Depends(auth_read)):
 
 @app.get("/v1/events")
 def recent_events(job_id: str | None = None, limit: int = Query(100, le=1000), user=Depends(auth_read)):
+    tid = tenant_of(user)
     with session_scope() as db:
-        q = select(Event).order_by(Event.ts.desc()).limit(limit)
+        q = select(Event).where(Event.org_id == tid).order_by(Event.ts.desc()).limit(limit)
         if job_id:
+            owned = db.execute(select(Job.id).where(Job.id == job_id, Job.org_id == tid)).scalar_one_or_none()
+            if owned is None:
+                return {"events": []}
             q = q.where(Event.job_id == job_id)
         rows = db.execute(q).scalars().all()
         return {"events": [{"ts": e.ts, "level": e.level, "event": e.event, "job_id": e.job_id, "data": json.loads(e.data_json)} for e in rows]}
+
+
+@app.get("/v1/audit")
+def recent_audit(limit: int = Query(100, le=1000), user=Depends(auth_audit)):
+    tid = tenant_of(user)
+    with session_scope() as db:
+        from agency.models import AuditLog
+
+        rows = db.execute(select(AuditLog).where(AuditLog.org_id == tid).order_by(AuditLog.ts.desc()).limit(limit)).scalars().all()
+        return {
+            "items": [
+                {"ts": a.ts, "actor": a.actor, "action": a.action, "entity_type": a.entity_type, "entity_id": a.entity_id, "detail": json.loads(a.detail_json or "{}")}
+                for a in rows
+            ]
+        }
+
+
+@app.post("/v1/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, user=Depends(auth_write)):
+    tid = tenant_of(user)
+    with session_scope() as db:
+        job = db.execute(select(Job).where(Job.id == job_id, Job.org_id == tid)).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.state in ("completed", "failed", "cancelled"):
+            raise HTTPException(409, f"cannot cancel job in state {job.state}")
+        job.state = "cancelled"
+        job.finished_at = now_iso()
+        db.commit()
+        return {"id": job.id, "state": job.state}
+
+
+@app.post("/v1/approvals/{approval_or_job}/decision")
+def decide_approval(approval_or_job: str, body: DecisionModel, user=Depends(auth_approve)):
+    with session_scope() as db:
+        approval = db.get(Approval, approval_or_job)
+        if approval is None or not _project_in_tenant(db, approval.project_id or "", tenant_of(user)):
+            candidate = db.execute(
+                select(Approval).where(Approval.job_id == approval_or_job, Approval.status == "requested").order_by(Approval.requested_at.desc())
+            ).scalars().first()
+            if candidate is None or not _project_in_tenant(db, candidate.project_id or "", tenant_of(user)):
+                raise HTTPException(404, "no pending approval found")
+            approval = candidate
+        approval.status = body.decision
+        approval.note = body.note
+        approval.decided_at = now_iso()
+        approval.decided_by = actor_name(user)
+        job = db.get(Job, approval.job_id)
+        if job is not None and job.state == "awaiting_approval":
+            if body.decision == "approved":
+                job.state = "queued"
+                job.heartbeat_at = None
+            else:
+                job.state = "failed"
+                job.error = f"rejected at approval gate: {body.note}"
+                job.finished_at = now_iso()
+                notify_webhooks(db, job.org_id, "job.failed", {"job_id": job.id, "reason": "approval_rejected"})
+        db.commit()
+        audit(db, actor_name(user), "approval.decided", "approval", approval.id, {"decision": body.decision}, org_id=tenant_of(user))
+        return {"approval_id": approval.id, "status": approval.status, "job_state": job.state if job else None}
+
+
+@app.post("/v1/webhooks")
+def create_webhook(body: WebhookCreate, user=Depends(auth_admin)):
+    from urllib.parse import urlparse
+
+    try:
+        assert_public_url(body.url)
+    except ValueError as exc:
+        raise HTTPException(422, f"webhook URL rejected: {exc}") from exc
+    parsed = urlparse(body.url)
+    if parsed.scheme != "https" and get_settings().env == "production":
+        raise HTTPException(422, "webhook URLs must use https in production")
+    invalid = [e for e in body.events if e not in WEBHOOK_EVENT_TYPES]
+    if invalid:
+        raise HTTPException(422, f"unknown event types: {invalid}; allowed: {WEBHOOK_EVENT_TYPES}")
+    secret = "whsec_" + secrets.token_urlsafe(32)
+    with session_scope() as db:
+        hook = Webhook(org_id=tenant_of(user), url=str(body.url), secret=secret, events_json=json.dumps(body.events), created_by=actor_name(user))
+        db.add(hook)
+        db.commit()
+        audit(db, actor_name(user), "webhook.created", "webhook", hook.id, {"url": str(body.url)}, org_id=tenant_of(user))
+        return {"id": hook.id, "url": hook.url, "secret": secret, "events": body.events, "note": "store the secret now; it is required to verify signatures"}
+
+
+@app.get("/v1/webhooks")
+def list_webhooks(user=Depends(auth_admin)):
+    with session_scope() as db:
+        hooks = db.execute(select(Webhook).where(Webhook.org_id == tenant_of(user))).scalars().all()
+        return {"items": [{"id": w.id, "url": w.url, "events": w.events, "active": bool(w.active)} for w in hooks]}
+
+
+@app.delete("/v1/webhooks/{webhook_id}")
+def delete_webhook(webhook_id: str, user=Depends(auth_admin)):
+    with session_scope() as db:
+        hook = db.execute(select(Webhook).where(Webhook.id == webhook_id, Webhook.org_id == tenant_of(user))).scalar_one_or_none()
+        if hook is None:
+            raise HTTPException(404, "webhook not found")
+        hook.active = False
+        db.commit()
+        audit(db, actor_name(user), "webhook.deleted", "webhook", webhook_id, {}, org_id=tenant_of(user))
+        return {"id": webhook_id, "deleted": True}
+
+
+@app.post("/v1/webhooks/{webhook_id}/test")
+def test_webhook(webhook_id: str, user=Depends(auth_admin)):
+    with session_scope() as db:
+        hook = db.execute(select(Webhook).where(Webhook.id == webhook_id, Webhook.org_id == tenant_of(user))).scalar_one_or_none()
+        if hook is None:
+            raise HTTPException(404, "webhook not found")
+        delivery_ids = dispatch_event(db, tenant_of(user), "job.completed", {"test": True})
+    stats = process_pending_deliveries_with_scope(tenant_of(user))
+    return {"dispatched": len(delivery_ids), "delivery_stats": stats}
+
+
+def process_pending_deliveries_with_scope(tenant: str) -> dict:
+    from agency.db import session_scope as scope
+
+    with scope() as db:
+        return process_pending_deliveries(db)
+
+
+@app.post("/v1/budgets")
+def create_budget(body: BudgetCreate, user=Depends(auth_admin)):
+    with session_scope() as db:
+        budget = Budget(
+            org_id=tenant_of(user),
+            project_id=body.project_id,
+            scope="project" if body.project_id else "tenant",
+            max_cost_per_job_usd=body.max_cost_per_job_usd,
+            daily_limit_usd=body.daily_limit_usd,
+            monthly_limit_usd=body.monthly_limit_usd,
+        )
+        db.add(budget)
+        db.commit()
+        audit(db, actor_name(user), "budget.created", "budget", budget.id, {"scope": budget.scope}, org_id=tenant_of(user))
+        return {"id": budget.id, "scope": budget.scope}
+
+
+@app.get("/v1/metrics", response_class=PlainTextResponse)
+def metrics(user=Depends(auth_read)):
+    with session_scope() as db:
+        queue_gauges = {}
+        for state in ("queued", "running", "retrying", "awaiting_approval", "failed", "completed"):
+            n = db.execute(select(func.count()).select_from(Job).where(Job.state == state)).scalar() or 0
+            queue_gauges[f'agency_queue_depth{{state="{state}"}}'] = float(n)
+    METRICS.set_gauge("agency_metrics_scrape_total", (METRICS.percentile("agency_api_request_latency_seconds", 50) or 0))
+    body = METRICS.render_prometheus(queue_gauges)
+    return Response(content=body, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/v1/system/status")
@@ -486,6 +774,14 @@ def system_status(user=Depends(auth_read)):
         for state in ("queued", "running", "awaiting_approval", "failed", "completed"):
             n = db.execute(select(func.count()).select_from(Job).where(Job.state == state)).scalar() or 0
             counts[state] = n
-    return {"version": __version__, "providers": providers, "queue": counts, "registry_agents_active": len([a for a in get_registry() if a["status"] == "active"])}
+    return {
+        "version": __version__,
+        "providers": {
+            **providers,
+            "video_generation": {"healthy": False, "detail": "OPTIONAL / NOT CONFIGURED — reserved adapter point"},
+        },
+        "queue": counts,
+        "registry_agents_active": len([a for a in get_registry() if a["status"] == "active"]),
+    }
 
 

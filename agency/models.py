@@ -31,6 +31,67 @@ class Org(Base):
     created_at: Mapped[str] = mapped_column(Text, default=now_iso)
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str]
+    status: Mapped[str] = mapped_column(Text, default="active")
+    created_at: Mapped[str] = mapped_column(Text, default=now_iso)
+
+    @property
+    def settings(self) -> dict:
+        return {}
+
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(Text, index=True)
+    url: Mapped[str]
+    secret: Mapped[str] = mapped_column(Text)
+    events_json: Mapped[str] = mapped_column(Text, default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(Text, default=now_iso)
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @property
+    def events(self) -> list:
+        return json.loads(self.events_json or "[]")
+
+    @events.setter
+    def events(self, value: list) -> None:
+        self.events_json = json.dumps(value)
+
+
+class WebhookDelivery(Base):
+    __tablename__ = "webhook_deliveries"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
+    webhook_id: Mapped[str] = mapped_column(Text, index=True)
+    event_type: Mapped[str]
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(Text, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    next_retry_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, default=now_iso)
+    delivered_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Budget(Base):
+    __tablename__ = "budgets"
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
+    org_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
+    scope: Mapped[str] = mapped_column(Text, default="tenant")
+    max_cost_per_job_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    daily_limit_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    monthly_limit_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(Text, default=now_iso)
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
@@ -38,6 +99,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, unique=True)
     role: Mapped[str] = mapped_column(Text, default="viewer")
     api_key_hash: Mapped[str] = mapped_column(Text, index=True)
+    api_key_expires_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_key_revoked_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    must_rotate_key: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(Text, default=now_iso)
 
 
@@ -73,6 +137,7 @@ class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
     project_id: Mapped[str] = mapped_column(Text, index=True)
+    org_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True)
     type: Mapped[str] = mapped_column(Text, default="production")
     state: Mapped[str] = mapped_column(Text, default="queued", index=True)
@@ -302,6 +367,7 @@ class CostEntry(Base):
     __tablename__ = "costs"
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=uid)
     project_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
+    org_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
     job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str]
@@ -321,6 +387,7 @@ class AuditLog(Base):
     action: Mapped[str]
     entity_type: Mapped[str]
     entity_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    org_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
     detail_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
@@ -330,6 +397,8 @@ class Event(Base):
     ts: Mapped[str] = mapped_column(Text, default=now_iso)
     job_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
     task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    org_id: Mapped[str | None] = mapped_column(Text, index=True, nullable=True)
     level: Mapped[str] = mapped_column(Text, default="info")
     event: Mapped[str]
     data_json: Mapped[str] = mapped_column(Text, default="{}")
+

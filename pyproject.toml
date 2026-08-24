@@ -36,6 +36,7 @@ addopts = "-q --strict-markers"
 markers = [
     "e2e: end-to-end production tests (slow)",
     "integration: integration tests",
+    "chaos: fault-injection tests (kill/restart)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

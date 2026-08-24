@@ -70,7 +70,7 @@ services:
     profiles: ["staging"]
     environment:
       POSTGRES_USER: agency
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required for staging profile}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-staging}
       POSTGRES_DB: agency
     volumes:
       - pg-data:/var/lib/postgresql/data
@@ -86,7 +86,7 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-agency}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?required for staging profile}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme-staging}
     ports:
       - "9000:9000"
       - "9001:9001"

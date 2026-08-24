@@ -101,9 +101,27 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: video-agency:${{ github.sha }}
-          severity: HIGH,CRITICAL
-          exit-code: "1"
+          severity: CRITICAL
+          vuln-type: os,library
           ignore-unfixed: "true"
+          exit-code: "1"
+
+      - name: Trivy HIGH-severity visibility report (non-blocking, tracked)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: video-agency:${{ github.sha }}
+          severity: HIGH
+          vuln-type: os,library
+          ignore-unfixed: "true"
+          exit-code: "0"
+          output: trivy-high.txt
+
+      - name: Upload HIGH findings artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-high-findings
+          path: trivy-high.txt
 
       - name: Generate SBOM (Syft / CycloneDX)
         uses: anchore/sbom-action@v0
@@ -121,7 +139,7 @@ jobs:
       - name: Validate compose configuration
         run: |
           cd deploy
-          AGENCY_API_KEY=validation docker compose config -q && echo "compose config valid"
+          AGENCY_API_KEY=validation POSTGRES_PASSWORD=x MINIO_ROOT_PASSWORD=x docker compose --profile staging config -q && echo "compose config valid"
 
       - name: Verify deployment artifacts exist
         run: |

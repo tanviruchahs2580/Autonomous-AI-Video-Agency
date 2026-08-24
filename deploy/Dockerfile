@@ -19,7 +19,9 @@ COPY agency ./agency
 COPY examples ./examples
 RUN pip install --no-cache-dir --no-deps .
 
-RUN useradd -m -u 10001 agency
+RUN useradd -m -u 10001 agency \
+    && mkdir -p /app/data/storage \
+    && chown -R agency:agency /app/data
 USER agency
 
 ENV AGENCY_DATA_DIR=/app/data \

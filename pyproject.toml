@@ -13,6 +13,9 @@ license = { text = "MIT" }
 [tool.setuptools.packages.find]
 include = ["agency*"]
 
+[tool.setuptools.package-data]
+agency = ["migrations/*.sql"]
+
 [tool.ruff]
 line-length = 140
 target-version = "py311"

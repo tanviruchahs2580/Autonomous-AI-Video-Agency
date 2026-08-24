@@ -55,28 +55,35 @@ jobs:
 
       - name: Container smoke test
         run: |
+          set -e
           docker run -d --name agency-smoke \
             -e AGENCY_ENV=development \
             -e AGENCY_API_KEY=ci-key \
             -p 8000:8000 \
             video-agency:${{ github.sha }}
-          for i in $(seq 1 30); do
+          status=0
+          ok=""
+          for i in $(seq 1 45); do
             if curl -fsS http://localhost:8000/health/live >/dev/null 2>&1; then
-              echo "liveness OK"
+              echo "liveness OK (attempt $i)"
+              ok=yes
               break
             fi
             sleep 2
           done
-          curl -fsS http://localhost:8000/health/live | tee /dev/stderr | grep -q alive
-          curl -fsS http://localhost:8000/health/ready | grep -q ready
+          [ "$ok" = yes ] || { echo "container never became live"; docker logs agency-smoke | tail -50; exit 1; }
+          curl -fsS http://localhost:8000/health/live | tee /dev/stderr | grep -q alive || status=1
+          curl -fsS http://localhost:8000/health/ready | tee /dev/stderr | grep -q ready || status=1
           AUTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/v1/projects)
           echo "unauthenticated /v1/projects -> $AUTH"
-          [ "$AUTH" = "401" ]
+          [ "$AUTH" = "401" ] || status=1
           AUTHED=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ci-key" http://localhost:8000/v1/projects)
           echo "authenticated /v1/projects -> $AUTHED"
-          [ "$AUTHED" = "200" ]
-          docker logs agency-smoke | tail -20
+          [ "$AUTHED" = "200" ] || status=1
+          echo "--- container logs ---"
+          docker logs agency-smoke | tail -30
           docker rm -f agency-smoke >/dev/null
+          exit $status
 
   deploy-validation:
     runs-on: ubuntu-latest

@@ -1,0 +1,20 @@
+{
+  "title": "CloudFlow Migration",
+  "objective": "Convince engineering teams that CloudFlow cuts deployment time from hours to minutes with zero-downtime rollouts and built-in rollback safety.",
+  "audience": "engineering leaders at mid-size companies",
+  "platform": "youtube",
+  "duration_s": 16,
+  "width": 640,
+  "height": 360,
+  "fps": 24,
+  "cta": "Start free trial",
+  "brand": {
+    "name": "CloudFlow",
+    "palette": ["#0E1524", "#2D7FF9", "#F5F8FC", "#FFC24B"]
+  },
+  "key_points": [
+    "Deploy in under five minutes with automated pipelines",
+    "Zero downtime rollouts keep every release safe",
+    "One click rollback protects production anytime"
+  ]
+}

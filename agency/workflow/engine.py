@@ -55,7 +55,17 @@ def create_job(
         state="queued",
     )
     db.add(job)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        from sqlalchemy.exc import IntegrityError
+
+        db.rollback()
+        if isinstance(exc, IntegrityError) and idempotency_key:
+            existing = db.execute(select(Job).where(Job.idempotency_key == idempotency_key)).scalar_one_or_none()
+            if existing is not None:
+                return existing, False
+        raise
     emit_event(db, job.id, None, "info", "job.created", {"type": job_type}, org_id=job.org_id)
     notify_webhooks(db, org_id, "job.created", {"job_id": job.id, "type": job_type})
     return job, True

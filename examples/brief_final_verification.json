@@ -1,0 +1,21 @@
+{
+  "title": "Astra AI Platform Launch",
+  "objective": "Convince CTOs that Astra AI cuts model deployment from weeks to hours with governed pipelines, real-time monitoring and instant rollback for any model version.",
+  "audience": "CTOs and ML leaders at enterprise companies",
+  "platform": "youtube",
+  "duration_s": 28,
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "cta": "Start your pilot today",
+  "language": "en",
+  "brand": {
+    "name": "Astra AI",
+    "palette": ["#0B1220", "#5B8DEF", "#F0F4FF", "#FFC857"]
+  },
+  "key_points": [
+    "Governed pipelines deploy any model in hours not weeks",
+    "Real-time monitoring catches drift before customers do",
+    "Instant rollback protects production on every release"
+  ]
+}

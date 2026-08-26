@@ -1,0 +1,15 @@
+DROP INDEX IF EXISTS ix_scriptrev_project;
+DROP INDEX IF EXISTS ix_reviews_deliverable;
+DROP INDEX IF EXISTS ix_campaigns_client;
+DROP INDEX IF EXISTS ix_campaigns_org;
+DROP INDEX IF EXISTS ix_brandkits_org;
+DROP INDEX IF EXISTS ix_clients_org;
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS script_revisions;
+DROP TABLE IF EXISTS deliverable_reviews;
+DROP TABLE IF EXISTS campaigns;
+DROP TABLE IF EXISTS brand_kits;
+DROP TABLE IF EXISTS clients;
+ALTER TABLE projects DROP COLUMN campaign_id;
+ALTER TABLE projects DROP COLUMN brand_kit_id;
+ALTER TABLE projects DROP COLUMN client_id;

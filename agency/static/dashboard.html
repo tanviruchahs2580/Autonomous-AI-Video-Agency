@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autonomous AI Video Agency — Control Center</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0e1a;--surface:#111827;--surface2:#1e293b;--border:#1e2a4a;--border2:#2d3a5c;
+  --text:#f1f5f9;--muted:#94a3b8;--dim:#64748b;
+  --accent:#3b82f6;--accent2:#60a5fa;--accent-bg:rgba(59,130,246,0.08);
+  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;
+  --radius:12px;--radius-sm:8px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
+a{color:var(--accent2);text-decoration:none}
+.mono{font-family:'JetBrains Mono',monospace}
+
+/* ── NAV ── */
+nav{position:sticky;top:0;z-index:50;background:rgba(10,14,26,0.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:56px}
+.nav-brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-0.02em}
+.nav-brand svg{width:28px;height:28px}
+.nav-links{display:flex;gap:4px}
+.nav-links button{background:none;border:none;color:var(--muted);padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;transition:.15s}
+.nav-links button:hover{color:var(--text);background:var(--surface2)}
+.nav-links button.active{color:var(--text);background:var(--accent-bg);border:1px solid rgba(59,130,246,0.25)}
+.nav-actions{display:flex;gap:8px;align-items:center}
+.badge{font-size:11px;font-weight:600;padding:3px 8px;border-radius:20px;background:var(--success);color:#fff}
+.btn{border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#2563eb}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}.btn-ghost:hover{background:var(--surface2);color:var(--text)}
+.btn-sm{padding:5px 10px;font-size:12px}
+
+/* ── LAYOUT ── */
+.container{max-width:1280px;margin:0 auto;padding:24px}
+.page-title{font-size:22px;font-weight:700;letter-spacing:-0.02em;margin-bottom:4px}
+.page-sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+
+/* ── STATS ── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.stat-label{font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--dim);margin-bottom:6px}
+.stat-value{font-size:24px;font-weight:700;letter-spacing:-0.03em}
+.stat-sub{font-size:11px;color:var(--muted);margin-top:4px}
+
+/* ── CARDS / TABLES ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.card-header h3{font-size:13px;font-weight:600}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--dim);font-weight:600;font-size:11px;letter-spacing:0.05em;text-transform:uppercase;text-align:left;padding:10px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:11px 16px;border-bottom:1px solid rgba(30,42,74,0.5);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(59,130,246,0.04)}
+.status-pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;display:inline-block}
+.s-queued{background:rgba(100,116,139,0.2);color:#94a3b8}
+.s-running{background:rgba(59,130,246,0.15);color:#60a5fa}
+.s-completed{background:rgba(16,185,129,0.15);color:#34d399}
+.s-failed{background:rgba(239,68,68,0.15);color:#f87171}
+.s-awaiting_approval{background:rgba(245,158,11,0.15);color:#fbbf24}
+
+/* ── FORMS ── */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-group{margin-bottom:12px}
+.form-group label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:5px}
+.form-group input,.form-group textarea,.form-group select{width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-size:13px;font-family:inherit;outline:none;transition:.15s}
+.form-group input:focus,.form-group textarea:focus,.form-group select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,0.15)}
+.form-group textarea{resize:vertical;min-height:72px}
+
+/* ── MODAL ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border2);border-radius:16px;width:100%;max-width:560px;max-height:90vh;overflow:auto}
+.modal-head{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.modal-head h3{font-size:15px;font-weight:600}
+.modal-body{padding:20px}
+.modal-foot{padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+
+/* ── VIDEO PLAYER ── */
+.player-wrap{position:relative;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+.player-wrap video{width:100%;height:100%;object-fit:contain}
+.player-empty{color:var(--muted);font-size:13px}
+
+/* ── TOAST ── */
+#toasts{position:fixed;bottom:20px;right:20px;z-index:200;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{background:var(--surface);border:1px solid var(--border2);border-radius:10px;padding:12px 16px;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.4);pointer-events:auto;animation:slideIn .25s ease}
+.toast.success{border-left:3px solid var(--success)}
+.toast.error{border-left:3px solid var(--danger)}
+.toast.info{border-left:3px solid var(--accent)}
+@keyframes slideIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}
+
+/* ── RESPONSIVE ── */
+@media(max-width:640px){
+  .form-row{grid-template-columns:1fr}
+  .stats{grid-template-columns:1fr 1fr}
+  nav{padding:0 12px}
+  .nav-links{overflow-x:auto}
+}
+.hidden{display:none!important}
+.progress-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--accent);transition:width .6s ease}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-brand">
+    <svg viewBox="0 0 28 28" fill="none"><rect width="28" height="28" rx="7" fill="#3b82f6"/><path d="M8 9h12v2H8zm0 5h12v2H8zm0 5h8v2H8z" fill="#fff"/><circle cx="20" cy="20" r="5" fill="#60a5fa" stroke="#fff" stroke-width="1.5"/><path d="M18 20l2 2 3-4" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Agency OS</span>
+    <span class="badge mono" style="font-size:10px;background:var(--surface2);border:1px solid var(--border2);color:var(--muted)">v1.2</span>
+  </div>
+  <div class="nav-links" id="navLinks">
+    <button class="active" data-page="dashboard">Dashboard</button>
+    <button data-page="projects">Projects</button>
+    <button data-page="jobs">Jobs</button>
+    <button data-page="deliverables">Deliverables</button>
+  </div>
+  <div class="nav-actions">
+    <span id="userBadge" class="mono" style="font-size:11px;color:var(--muted)"></span>
+    <button class="btn btn-ghost btn-sm" onclick="logout()">Logout</button>
+  </div>
+</nav>
+
+<!-- AUTH SCREEN -->
+<div id="authScreen" style="min-height:calc(100vh - 56px);display:flex;align-items:center;justify-content:center;padding:24px">
+  <div class="card" style="width:100%;max-width:400px">
+    <div style="padding:28px 24px 20px;text-align:center">
+      <div style="width:48px;height:48px;background:var(--accent);border-radius:12px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+      </div>
+      <h2 style="font-size:18px;font-weight:700">Sign in to Agency OS</h2>
+      <p style="font-size:13px;color:var(--muted);margin-top:4px">Autonomous video production control center</p>
+    </div>
+    <div style="padding:0 24px 24px">
+      <div class="form-group"><label>Email</label><input id="authEmail" type="email" placeholder="ops@agency.test" value="admin@demo.test"></div>
+      <div class="form-group"><label>Password</label><input id="authPass" type="password" placeholder="••••••••" value="demo12345"></div>
+      <div id="authError" class="hidden" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:12px"></div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="doLogin()">Sign in</button>
+      <div style="text-align:center;margin-top:12px"><button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center" onclick="doRegister()">Create demo account</button></div>
+      <p style="font-size:11px;color:var(--dim);text-align:center;margin-top:14px">Dev: use <span class="mono" style="color:var(--muted)">X-API-Key</span> header for machine access</p>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="appScreen" class="hidden">
+  <div class="container">
+
+    <!-- DASHBOARD -->
+    <div id="page-dashboard">
+      <h1 class="page-title">Dashboard</h1>
+      <p class="page-sub">Real-time overview of your video production pipeline</p>
+      <div class="stats" id="statsGrid">
+        <div class="stat"><div class="stat-label">Projects</div><div class="stat-value mono" id="statProjects">—</div><div class="stat-sub" id="statProjectsSub"></div></div>
+        <div class="stat"><div class="stat-label">Jobs — Queued / Running</div><div class="stat-value mono" id="statQueue">—</div><div class="stat-sub" id="statQueueSub"></div></div>
+        <div class="stat"><div class="stat-label">Completed</div><div class="stat-value mono" style="color:var(--success)" id="statCompleted">—</div><div class="stat-sub">lifetime</div></div>
+        <div class="stat"><div class="stat-label">Awaiting Approval</div><div class="stat-value mono" style="color:var(--warning)" id="statApproval">—</div><div class="stat-sub" id="statApprovalSub"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Recent Jobs</h3><button class="btn btn-ghost btn-sm" onclick="switchPage('jobs')">View all →</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Job</th><th>Project</th><th>Status</th><th>Progress</th></tr></thead><tbody id="dashJobs"><tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr></tbody></table></div>
+      </div>
+    </div>
+
+    <!-- PROJECTS -->
+    <div id="page-projects" class="hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:4px">
+        <h1 class="page-title" style="margin:0">Projects</h1>
+        <button class="btn btn-primary" onclick="openNewProject()">+ New Project</button>
+      </div>
+      <p class="page-sub">Each project holds one brief and its production jobs</p>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Jobs</th><th></th></tr></thead><tbody id="projectsBody"><tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No projects yet</td></tr></tbody></table></div></div>
+    </div>
+
+    <!-- JOBS -->
+    <div id="page-jobs" class="hidden">
+      <h1 class="page-title">Jobs</h1>
+      <p class="page-sub">Production jobs — click to inspect, approve, or review deliverables</p>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Job</th><th>Project</th><th>Status</th><th>Attempts</th><th>Actions</th></tr></thead><tbody id="jobsBody"></tbody></table></div></div>
+    </div>
+
+    <!-- DELIVERABLES -->
+    <div id="page-deliverables" class="hidden">
+      <h1 class="page-title">Deliverables</h1>
+      <p class="page-sub">Final renders — preview, download, and approval</p>
+      <div id="deliverablesGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- NEW PROJECT MODAL -->
+<div class="modal-overlay" id="modalProject">
+  <div class="modal">
+    <div class="modal-head"><h3>New Project</h3><button class="btn btn-ghost btn-sm" onclick="closeModal('modalProject')">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>Project Name</label><input id="pName" placeholder="Q3 Launch — Astra AI"></div>
+      <div class="form-group"><label>Title (video headline)</label><input id="pTitle" placeholder="Astra AI Platform Launch"></div>
+      <div class="form-group"><label>Objective — what must the video achieve?</label><textarea id="pObjective" placeholder="Convince CTOs that Astra cuts deployment from weeks to hours…"></textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>Audience</label><input id="pAudience" value="CTOs and ML leaders"></div>
+        <div class="form-group"><label>CTA</label><input id="pCTA" value="Start your pilot today"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Duration (seconds)</label><input id="pDuration" type="number" value="28"></div>
+        <div class="form-group"><label>Platform</label><select id="pPlatform"><option>youtube</option><option>tiktok</option><option>instagram_reels</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Language</label><select id="pLang"><option value="en">English — AriaNeural</option><option value="bn">Bangla — NabanitaNeural</option><option value="hi">Hindi — SwaraNeural</option><option value="es">Spanish — ElviraNeural</option></select></div>
+        <div class="form-group"><label>Key Points (one per line, max 3)</label><textarea id="pKeyPoints" placeholder="Governed pipelines deploy in hours&#10;Real-time monitoring catches drift"></textarea></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('modalProject')">Cancel</button><button class="btn btn-primary" onclick="createProject()">Create & Start Job →</button></div>
+  </div>
+</div>
+
+<!-- JOB DETAIL MODAL -->
+<div class="modal-overlay" id="modalJob">
+  <div class="modal" style="max-width:680px">
+    <div class="modal-head"><h3 id="jobModalTitle">Job Detail</h3><button class="btn btn-ghost btn-sm" onclick="closeModal('modalJob')">✕</button></div>
+    <div class="modal-body" id="jobModalBody" style="font-size:13px"></div>
+    <div class="modal-foot" id="jobModalFoot"></div>
+  </div>
+</div>
+
+<!-- DELIVERABLE PREVIEW MODAL -->
+<div class="modal-overlay" id="modalPreview">
+  <div class="modal" style="max-width:720px">
+    <div class="modal-head"><h3 id="previewTitle">Preview</h3><button class="btn btn-ghost btn-sm" onclick="closeModal('modalPreview')">✕</button></div>
+    <div class="modal-body" style="padding:0">
+      <div class="player-wrap" id="playerWrap"><span class="player-empty">Select a deliverable to preview</span></div>
+      <div style="padding:16px" id="previewMeta"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+const API = location.origin;
+let TOKEN = localStorage.getItem('agency_token') || '';
+let USER_EMAIL = localStorage.getItem('agency_email') || '';
+
+// ── AUTH ──
+function showAuth(){ document.getElementById('authScreen').style.display='flex'; document.getElementById('appScreen').classList.add('hidden'); }
+function showApp(){ document.getElementById('authScreen').style.display='none'; document.getElementById('appScreen').classList.remove('hidden'); document.getElementById('userBadge').textContent = USER_EMAIL; refreshAll(); }
+if(TOKEN) showApp();
+
+async function doLogin(){
+  const email=document.getElementById('authEmail').value.trim(), password=document.getElementById('authPass').value;
+  const r=await fetch(`${API}/auth/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+  const j=await r.json();
+  if(!r.ok){ showErr(j.detail||'Login failed'); return; }
+  TOKEN=j.access_token; USER_EMAIL=j.email; localStorage.setItem('agency_token',TOKEN); localStorage.setItem('agency_email',USER_EMAIL); showApp(); toast('Signed in','success');
+}
+async function doRegister(){
+  const email=document.getElementById('authEmail').value.trim(), password=document.getElementById('authPass').value;
+  const r=await fetch(`${API}/auth/register`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,tenant_name: email.split('@')[1]||'Demo'})});
+  const j=await r.json();
+  if(!r.ok){ showErr(j.detail||'Registration failed'); return; }
+  TOKEN=j.access_token; USER_EMAIL=email; localStorage.setItem('agency_token',TOKEN); localStorage.setItem('agency_email',USER_EMAIL); showApp(); toast('Account created','success');
+}
+function logout(){ localStorage.clear(); TOKEN=''; showAuth(); }
+function showErr(m){ const e=document.getElementById('authError'); e.textContent=m; e.classList.remove('hidden'); }
+function authHeader(){ return TOKEN ? {'Authorization':`Bearer ${TOKEN}`} : {}; }
+function toast(msg, kind='info'){ const t=document.createElement('div'); t.className=`toast ${kind}`; t.textContent=msg; document.getElementById('toasts').appendChild(t); setTimeout(()=>t.remove(),3500); }
+
+// ── NAV ──
+document.querySelectorAll('#navLinks button').forEach(b=> b.addEventListener('click',()=>switchPage(b.dataset.page)));
+function switchPage(p){
+  document.querySelectorAll('#navLinks button').forEach(b=>b.classList.toggle('active',b.dataset.page===p));
+  ['dashboard','projects','jobs','deliverables'].forEach(id=> document.getElementById('page-'+id).classList.toggle('hidden', id!==p));
+  if(p==='dashboard') loadDashboard();
+  if(p==='projects') loadProjects();
+  if(p==='jobs') loadJobs();
+  if(p==='deliverables') loadDeliverables();
+}
+function refreshAll(){ loadDashboard(); }
+
+function pill(status){
+  const cls = {queued:'s-queued',running:'s-running',completed:'s-completed',failed:'s-failed',awaiting_approval:'s-awaiting_approval'}[status]||'s-queued';
+  return `<span class="status-pill ${cls}">${status.replace('_',' ')}</span>`;
+}
+
+// ── DASHBOARD ──
+async function loadDashboard(){
+  try{
+    const [sysR, projR, jobsR] = await Promise.all([
+      fetch(`${API}/v1/system/status`,{headers:authHeader()}),
+      fetch(`${API}/v1/projects?size=100`,{headers:authHeader()}),
+      fetch(`${API}/v1/jobs?size=10`,{headers:authHeader()}),
+    ]);
+    const sys = await sysR.json(), projs = await projR.json(), jobs = await jobsR.json();
+    document.getElementById('statProjects').textContent = projs.total ?? '—';
+    document.getElementById('statQueue').textContent = `${sys.queue?.queued??0} / ${sys.queue?.running??0}`;
+    document.getElementById('statCompleted').textContent = sys.queue?.completed ?? '—';
+    document.getElementById('statApproval').textContent = sys.queue?.awaiting_approval ?? '0';
+    const tbody=document.getElementById('dashJobs');
+    if(!jobs.items||!jobs.items.length){ tbody.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px">No jobs yet — create a project to start</td></tr>'; return; }
+    tbody.innerHTML = jobs.items.slice(0,5).map(j=> `<tr><td class="mono" style="font-size:12px">${j.id.slice(0,8)}</td><td style="font-size:12px">${j.project_id.slice(0,8)}</td><td>${pill(j.state)}</td><td><div class="progress-bar"><div class="progress-fill" style="width:${j.state==='completed'?100:j.state==='running'?45:10}%"></div></div></td></tr>`).join('');
+  }catch(e){ console.error(e); }
+}
+
+// ── PROJECTS ──
+async function loadProjects(){
+  const r=await fetch(`${API}/v1/projects?size=100`,{headers:authHeader()});
+  const j=await r.json();
+  const tbody=document.getElementById('projectsBody');
+  if(!j.items||!j.items.length){ tbody.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px">No projects — create your first</td></tr>'; return; }
+  tbody.innerHTML=j.items.map(p=> `<tr><td><strong>${esc(p.name)}</strong></td><td><span class="status-pill s-queued">${esc(p.status)}</span></td><td class="mono" style="font-size:12px">${p.id.slice(0,8)}</td><td><button class="btn btn-ghost btn-sm" onclick="viewProject('${p.id}')">Open</button> <button class="btn btn-primary btn-sm" onclick="startJob('${p.id}')">▶ Run</button></td></tr>`).join('');
+}
+async function viewProject(id){
+  const r=await fetch(`${API}/v1/projects/${id}`,{headers:authHeader()});
+  const p=await r.json();
+  document.getElementById('jobModalTitle').textContent=p.name;
+  let html=`<p style="color:var(--muted);font-size:12px" class="mono">${p.id}</p><p style="margin-top:8px">${esc(JSON.stringify(p.brief,null,2))}</p>`;
+  html+=`<h4 style="margin-top:14px">Jobs</h4>` + (p.jobs||[]).map(j=> `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span class="mono" style="font-size:12px">${j.id.slice(0,8)}</span> ${pill(j.state)} <button class="btn btn-ghost btn-sm" onclick="openJob('${j.id}')">Inspect</button></div>`).join('') || '<p style="color:var(--muted)">No jobs</p>';
+  document.getElementById('jobModalBody').innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;background:var(--surface2);padding:12px;border-radius:8px;max-height:240px;overflow:auto">${esc(JSON.stringify(p.brief,null,2))}</pre>`+ `<div style="margin-top:12px">${(p.jobs||[]).map(j=>`<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12px"><span class="mono">${j.id.slice(0,8)}</span>${pill(j.state)}<button class="btn btn-ghost btn-sm" onclick="openJob('${j.id}')">Inspect</button></div>`).join('')||'No jobs'}</div>`;
+  document.getElementById('jobModalFoot').innerHTML=`<button class="btn btn-primary" onclick="startJob('${id}');closeModal('modalJob')">▶ Start Production Job</button>`;
+  openModal('modalJob');
+}
+async function startJob(projectId){
+  const r=await fetch(`${API}/v1/projects/${projectId}/jobs`,{method:'POST',headers:{...authHeader(),'Content-Type':'application/json'},body:JSON.stringify({})});
+  const j=await r.json();
+  if(!r.ok){ toast(j.detail||'Failed to create job','error'); return; }
+  toast(`Job ${j.id.slice(0,8)} created — running…`,'success');
+  // trigger inline execution
+  const runR=await fetch(`${API}/v1/jobs/${j.id}/run`,{method:'POST',headers:authHeader()});
+  const runJ=await runR.json();
+  toast(`Job ${runJ.state}`,'info');
+  if(runJ.state==='completed') toast('Deliverables ready!','success');
+  loadProjects(); loadDashboard();
+}
+function openNewProject(){ document.getElementById('modalProject').classList.add('open'); }
+async function createProject(){
+  const body={
+    name: document.getElementById('pName').value.trim(),
+    brief:{
+      title: document.getElementById('pTitle').value.trim(),
+      objective: document.getElementById('pObjective').value.trim(),
+      audience: document.getElementById('pAudience').value.trim(),
+      cta: document.getElementById('pCTA').value.trim(),
+      duration_s: parseFloat(document.getElementById('pDuration').value)||28,
+      platform: document.getElementById('pPlatform').value,
+      language: document.getElementById('pLang').value,
+      key_points: document.getElementById('pKeyPoints').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,3),
+    }
+  };
+  if(!body.name||!body.brief.title||!body.brief.objective){ toast('Fill project name, title and objective','error'); return; }
+  const r=await fetch(`${API}/v1/projects`,{method:'POST',headers:{...authHeader(),'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();
+  if(!r.ok){ toast(j.detail||'Create failed','error'); return; }
+  closeModal('modalProject');
+  toast('Project created','success');
+  // auto-start job
+  await startJob(j.id);
+}
+
+// ── JOBS ──
+async function loadJobs(){
+  const r=await fetch(`${API}/v1/jobs?size=50`,{headers:authHeader()});
+  const j=await r.json();
+  const tbody=document.getElementById('jobsBody');
+  if(!j.items||!j.items.length){ tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">No jobs</td></tr>'; return; }
+  tbody.innerHTML=j.items.map(job=> `<tr><td class="mono" style="font-size:12px">${job.id.slice(0,8)}</td><td class="mono" style="font-size:11px">${job.project_id.slice(0,8)}</td><td>${pill(job.state)}</td><td class="mono" style="font-size:12px">${job.attempts??0}</td><td><button class="btn btn-ghost btn-sm" onclick="openJob('${job.id}')">Inspect</button></td></tr>`).join('');
+}
+async function openJob(id){
+  const r=await fetch(`${API}/v1/jobs/${id}`,{headers:authHeader()});
+  const j=await r.json();
+  document.getElementById('jobModalTitle').textContent=`Job ${id.slice(0,8)} — ${j.state}`;
+  let html=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${pill(j.state)} <span class="mono" style="font-size:11px;color:var(--muted)">attempts ${j.attempts} · repairs ${j.repair_count}</span></div>`;
+  if(j.error) html+=`<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);padding:8px 10px;border-radius:8px;font-size:12px;color:#f87171;margin-bottom:10px">${esc(j.error)}</div>`;
+  html+=`<h4 style="font-size:12px;margin-bottom:6px">Tasks</h4><div style="max-height:160px;overflow:auto">` + (j.tasks||[]).map(t=> `<div style="display:flex;justify-content:space-between;padding:4px 6px;font-size:11px;border-bottom:1px solid rgba(30,42,74,0.4)"><span>${esc(t.name)}</span><span>${pill(t.state)}</span></div>`).join('') + '</div>';
+  if(j.qa_reports && j.qa_reports.length){
+    html+=`<h4 style="font-size:12px;margin:10px 0 6px">QA Reports</h4>` + j.qa_reports.map(q=> `<div style="font-size:11px;padding:4px 6px;background:${q.passed?'rgba(16,185,129,0.08)':'rgba(239,68,68,0.08)'};border-radius:6px;margin-bottom:4px">${q.layer}: ${q.passed?'✓ PASS':'✗ FAIL'} (score ${q.score}) ${q.findings&&q.findings.length?'<br><span style="color:var(--muted)">'+esc(q.findings.join('; '))+'</span>':''}</div>`).join('');
+  }
+  if(j.result && j.result.deliverables){
+    html+=`<h4 style="font-size:12px;margin:10px 0 6px">Deliverables</h4>` + j.result.deliverables.map(d=> `<div style="font-size:11px" class="mono">${esc(d.kind)} — ${esc(d.path)}</div>`).join('');
+  }
+  document.getElementById('jobModalBody').innerHTML=html;
+  let foot='';
+  if(j.state==='queued'||j.state==='running') foot+=`<button class="btn btn-ghost" onclick="cancelJob('${id}')">Cancel</button>`;
+  if(j.state==='awaiting_approval') foot+=`<button class="btn btn-primary" onclick="decideJob('${id}','approved')">✓ Approve</button><button class="btn btn-ghost" onclick="decideJob('${id}','rejected')">Reject</button>`;
+  if(j.state==='completed' && j.result && j.result.deliverables && j.result.deliverables[0]) foot+=`<button class="btn btn-primary" onclick="previewDeliverable('${j.result.deliverables[0].path}')">▶ Preview</button>`;
+  document.getElementById('jobModalFoot').innerHTML=foot || '<button class="btn btn-ghost" onclick="closeModal(\'modalJob\')">Close</button>';
+  openModal('modalJob');
+}
+async function cancelJob(id){ await fetch(`${API}/v1/jobs/${id}/cancel`,{method:'POST',headers:authHeader()}); toast('Job cancelled','info'); loadJobs(); }
+async function decideJob(id,decision){
+  const r=await fetch(`${API}/v1/approvals/${id}/decision`,{method:'POST',headers:{...authHeader(),'Content-Type':'application/json'},body:JSON.stringify({decision})});
+  const j=await r.json(); toast(j.job_state||decision,'success'); closeModal('modalJob'); loadJobs();
+}
+
+// ── DELIVERABLES ──
+async function loadDeliverables(){
+  const r=await fetch(`${API}/v1/deliverables?size=50`,{headers:authHeader()});
+  const j=await r.json();
+  const grid=document.getElementById('deliverablesGrid');
+  if(!j.items||!j.items.length){ grid.innerHTML='<p style="color:var(--muted);font-size:13px">No deliverables yet — complete a job first</p>'; return; }
+  grid.innerHTML=j.items.map(d=> {
+    const m=d.manifest||{};
+    return `<div class="card" style="cursor:pointer" onclick="previewDeliverable('${esc(d.path||'')}','${esc(m.title||'')}')">
+      <div style="aspect-ratio:16/9;background:var(--surface2);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">▶ Preview</div>
+      <div style="padding:12px"><div style="font-weight:600;font-size:13px">${esc(m.title||d.platform||'Deliverable')}</div><div style="font-size:11px;color:var(--muted)" class="mono">${esc(d.platform||'')} · ${esc(m.resolution||'')}</div>
+      <div style="margin-top:8px;display:flex;gap:6px"><a class="btn btn-primary btn-sm" href="${API}/v1/deliverables/${d.id}/download" target="_blank" onclick="event.stopPropagation()">Download</a></div></div></div>`;
+  }).join('');
+}
+function previewDeliverable(path,title){
+  document.getElementById('previewTitle').textContent=title||'Preview';
+  // Try to resolve deliverable id from path
+  const wrap=document.getElementById('playerWrap');
+  // Use direct file path via artifact download if needed — for now show placeholder with download link
+  wrap.innerHTML=`<video controls autoplay style="width:100%;height:100%;object-fit:contain" src="${API}/v1/deliverables/${path.includes('/')? '' : path}/download" onerror="this.poster='';this.parentElement.innerHTML='<span class=\\'player-empty\\'>Preview unavailable — use Download</span>'"></video>`;
+  document.getElementById('previewMeta').innerHTML=`<p class="mono" style="font-size:11px;color:var(--muted);word-break:break-all">${esc(path)}</p>`;
+  openModal('modalPreview');
+}
+
+// ── UTILS ──
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function openModal(id){ document.getElementById(id).classList.add('open'); }
+function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(m=> m.addEventListener('click',e=>{ if(e.target===m) m.classList.remove('open'); }));
+</script>
+</body>
+</html>

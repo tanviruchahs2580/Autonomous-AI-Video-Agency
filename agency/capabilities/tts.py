@@ -101,6 +101,23 @@ class SynthTTSProvider(TTSProvider):
         return TTSResult(path=dst, duration=round(duration, 3), words=timings, provider=self.name, voice=self.voice)
 
 
+VOICE_MAP: dict[str, str] = {
+    "en": "en-US-AriaNeural",
+    "bn": "bn-BD-NabanitaNeural",
+    "bn-BD": "bn-BD-NabanitaNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "es": "es-ES-ElviraNeural",
+    "ar": "ar-SA-ZariyahNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+    "ja": "ja-JP-NanamiNeural",
+}
+
+
+def voice_for_language(lang: str) -> str:
+    return VOICE_MAP.get(lang, VOICE_MAP.get(lang.split("-")[0], "en-US-AriaNeural"))
+
+
 class EdgeTTSProvider(TTSProvider):
     name = "edge-tts"
 

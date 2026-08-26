@@ -394,6 +394,15 @@ def _synthesize_narration(spec: dict, scenes: list[dict], workdir: Path) -> tupl
 
     preferred = get_settings().tts_provider
     provider, fallback_reason = get_tts_provider(preferred)
+    # Apply language-specific voice for edge-tts (Bangla, Hindi, etc.)
+    lang = str(spec.get("language", "en"))
+    if lang != "en" and getattr(provider, "name", "") == "edge-tts":
+        try:
+            from ..capabilities.tts import EdgeTTSProvider, voice_for_language
+            if isinstance(provider, EdgeTTSProvider):
+                provider.voice = voice_for_language(lang)
+        except Exception as exc:
+            logger.debug("language voice override skipped: %s", exc)
     segments_dir = workdir / "narration_segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
     combined_words: list[dict] = []
@@ -574,10 +583,26 @@ def stage_motion_graphics(db, job: Job, task: Task, context: dict) -> dict:
         offsets[s["id"]] = cursor
         cursor += s["duration_s"]
     first_scene_len = scenes[0]["duration_s"]
+    total_duration = sum(s["duration_s"] for s in scenes)
     overlays = [
         {"path": str(title_card), "start": 0.0, "end": round(min(first_scene_len * 0.55, 3.0), 2), "mode": "full"},
         {"path": str(lt), "start": round(offsets[lower_third_scene["id"]] + 0.4, 2), "end": round(offsets[lower_third_scene["id"]] + min(lower_third_scene["duration_s"] - 0.4, 4.5), 2), "mode": "corner", "anchor_x": 0.06, "anchor_y": 0.78},
     ]
+    # Logo watermark overlay (if brand kit logo exists)
+    try:
+        project = db.get(Project, job.project_id)
+        if project and getattr(project, "brand_kit_id", None):
+            from pathlib import Path as _LogoPath
+
+            from sqlalchemy import select as _sel
+
+            from agency.models_platform import BrandKit as _BK
+
+            bk = db.execute(_sel(_BK).where(_BK.id == project.brand_kit_id)).scalar_one_or_none()
+            if bk and bk.logo_key and _LogoPath(bk.logo_key).exists():
+                overlays.append({"path": str(bk.logo_key), "start": 0.0, "end": round(total_duration, 2), "mode": "watermark", "anchor_x": 0.92, "anchor_y": 0.05, "scale": 0.08})
+    except Exception as exc:
+        logger.debug("logo overlay skipped: %s", exc)
     overlays_persist = [{**o, "path": str(o["path"])} for o in overlays]
     register_artifact(db, job.project_id, job.id, task.id, "graphics_overlay", title_card, {}, {"origin": "procedural"})
     register_artifact(db, job.project_id, job.id, task.id, "graphics_overlay", lt, {}, {"origin": "procedural"})

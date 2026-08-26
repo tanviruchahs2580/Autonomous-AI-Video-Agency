@@ -8,13 +8,15 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy import text as sqltext
 
 from agency import __version__
 from agency.agents.registry import get_registry
+from agency.auth import hash_password, make_token, verify_password, verify_token
 from agency.capabilities.media import MediaError
 from agency.capabilities.media import probe as media_probe
 from agency.capabilities.router import check_provider_health
@@ -40,6 +42,7 @@ from agency.models import (
     Webhook,
     now_iso,
 )
+from agency.models_platform import BrandKit, Campaign, Client, DeliverableReview, NotificationRecord, ScriptRevision
 from agency.observability import audit, new_request_id
 from agency.security import (
     RateLimiter,
@@ -59,6 +62,15 @@ from agency.workflow.engine import WorkflowEngine, claim_job, create_job, notify
 logger = logging.getLogger("agency.api")
 
 app = FastAPI(title="Autonomous AI Video Agency", version=__version__, docs_url="/docs")
+
+# ── STATIC FRONTEND ────────────────────────────────────────────────────────
+_static_dir = Path(__file__).resolve().parent.parent / "static"
+if _static_dir.exists():
+    app.mount("/app", StaticFiles(directory=str(_static_dir), html=True), name="dashboard")
+
+    @app.get("/", include_in_schema=False)
+    def _root_redirect():
+        return RedirectResponse(url="/app/dashboard.html")
 _rate = RateLimiter(get_settings().rate_limit_per_min)
 
 _settings_boot = get_settings()
@@ -156,6 +168,220 @@ auth_write = _auth_factory("write")
 auth_approve = _auth_factory("approve")
 auth_admin = _auth_factory("admin")
 auth_audit = _auth_factory("audit")
+
+
+# ── AUTHENTICATION (JWT for frontend) ────────────────────────────────────────
+
+class RegisterModel(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=8, max_length=128)
+    tenant_name: str = Field(default="", max_length=100)
+
+
+@app.post("/auth/register")
+def register(body: RegisterModel):
+    with session_scope() as db:
+        existing = db.execute(select(User).where(User.email == body.email)).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(409, "email already registered")
+        from agency.models import uid
+        if body.tenant_name:
+            tenant_id = uid()
+            db.add(Tenant(id=tenant_id, name=body.tenant_name))
+            db.commit()
+            db.add(Org(id=tenant_id, name=body.tenant_name))
+            org_id = tenant_id
+        else:
+            org_id = "default"
+        pw_hash = hash_password(body.password)
+        user = User(org_id=org_id, email=body.email, role="admin", api_key_hash=pw_hash)
+        db.add(user)
+        db.commit()
+    token = make_token({"sub": body.email, "org": org_id, "role": "admin"})
+    return {"access_token": token, "token_type": "bearer", "email": body.email}
+
+
+class LoginModel(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/auth/login")
+def login(body: LoginModel):
+    with session_scope() as db:
+        user = db.execute(select(User).where(User.email == body.email)).scalar_one_or_none()
+        if user is None:
+            raise HTTPException(401, "invalid credentials")
+        if not verify_password(body.password, user.api_key_hash):
+            raise HTTPException(401, "invalid credentials")
+        token = make_token({"sub": user.email, "org": user.org_id, "role": user.role})
+    return {"access_token": token, "token_type": "bearer", "email": user.email}
+
+
+def _jwt_payload(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    payload = verify_token(auth_header[7:])
+    if payload is None:
+        raise HTTPException(401, "invalid or expired token")
+    return payload
+
+
+# ── CLIENTS ──────────────────────────────────────────────────────────────────
+
+class ClientCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/v1/clients")
+def create_client(body: ClientCreate, request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        c = Client(org_id=p["org"], name=body.name)
+        db.add(c)
+        db.commit()
+        return {"id": c.id, "name": c.name}
+
+
+@app.get("/v1/clients")
+def list_clients(request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        rows = db.execute(select(Client).where(Client.org_id == p["org"])).scalars().all()
+        return {"items": [{"id": c.id, "name": c.name} for c in rows]}
+
+
+# ── BRAND KITS ───────────────────────────────────────────────────────────────
+
+class BrandKitCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    palette: list[str] = Field(default_factory=list)
+
+
+@app.post("/v1/brand-kits")
+def create_brand_kit(body: BrandKitCreate, request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        bk = BrandKit(org_id=p["org"], name=body.name, palette_json=json.dumps(body.palette))
+        db.add(bk)
+        db.commit()
+        return {"id": bk.id, "name": bk.name}
+
+
+@app.get("/v1/brand-kits")
+def list_brand_kits(request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        rows = db.execute(select(BrandKit).where(BrandKit.org_id == p["org"])).scalars().all()
+        return {"items": [{"id": b.id, "name": b.name, "palette": json.loads(b.palette_json)} for b in rows]}
+
+
+# ── CAMPAIGNS ────────────────────────────────────────────────────────────────
+
+class CampaignCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    client_id: str | None = None
+
+
+@app.post("/v1/campaigns")
+def create_campaign(body: CampaignCreate, request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        c = Campaign(org_id=p["org"], client_id=body.client_id, name=body.name)
+        db.add(c)
+        db.commit()
+        return {"id": c.id, "name": c.name}
+
+
+@app.get("/v1/campaigns")
+def list_campaigns(request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        rows = db.execute(select(Campaign).where(Campaign.org_id == p["org"])).scalars().all()
+        return {"items": [{"id": c.id, "name": c.name, "client_id": c.client_id} for c in rows]}
+
+
+# ── SCRIPT REVISION ──────────────────────────────────────────────────────────
+
+class ScriptRevisionModel(BaseModel):
+    hook: str = Field(max_length=500)
+    beats: list[str] = Field(max_length=5)
+    cta: str = Field(max_length=300)
+
+
+@app.patch("/v1/projects/{project_id}/script")
+def revise_script(project_id: str, body: ScriptRevisionModel, request: Request):
+    p = _jwt_payload(request)
+    tid = p["org"]
+    with session_scope() as db:
+        proj = db.execute(select(Project).where(Project.id == project_id, Project.org_id == tid)).scalar_one_or_none()
+        if proj is None:
+            raise HTTPException(404, "not found")
+        sections = {"hook": body.hook, "beats": body.beats, "cta": body.cta}
+        full_text = f"{body.hook} {' '.join(body.beats)} {body.cta}"
+        rev_count = db.execute(select(func.count()).select_from(ScriptRevision).where(ScriptRevision.project_id == project_id)).scalar() or 0
+        rev = ScriptRevision(project_id=project_id, version=rev_count + 2, sections_json=json.dumps(sections), full_text=full_text, edited_by=p["sub"])
+        db.add(rev)
+        db.commit()
+        return {"version": rev.version, "message": "Script revised. Create a new job to re-render."}
+
+
+@app.get("/v1/projects/{project_id}/script/revisions")
+def list_script_revisions(project_id: str, request: Request):
+    _jwt_payload(request)
+    with session_scope() as db:
+        rows = db.execute(select(ScriptRevision).where(ScriptRevision.project_id == project_id).order_by(ScriptRevision.version)).scalars().all()
+        return {"items": [{"version": r.version, "full_text": r.full_text} for r in rows]}
+
+
+# ── DELIVERABLE REVIEW ───────────────────────────────────────────────────────
+
+class ReviewAction(BaseModel):
+    action: str = Field(pattern="^(submit_review|approve|request_changes|comment)$")
+    comment: str = Field(default="", max_length=1000)
+
+
+@app.post("/v1/deliverables/{deliverable_id}/review")
+def review_deliverable(deliverable_id: str, body: ReviewAction, request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        d = db.get(Deliverable, deliverable_id)
+        if d is None:
+            raise HTTPException(404, "not found")
+        manifest = json.loads(d.manifest_json)
+        current = manifest.get("approval_status", "draft")
+        review = DeliverableReview(deliverable_id=deliverable_id, reviewer=p["sub"], action=body.action, comment=body.comment)
+        db.add(review)
+        new_status = current
+        if body.action == "submit_review":
+            new_status = "internal_review"
+        elif body.action == "approve":
+            new_status = "approved"
+        elif body.action == "request_changes":
+            new_status = "changes_requested"
+        manifest["approval_status"] = new_status
+        d.manifest = manifest
+        db.commit()
+        return {"deliverable_id": deliverable_id, "status": new_status}
+
+
+@app.get("/v1/deliverables/{deliverable_id}/reviews")
+def list_reviews(deliverable_id: str, request: Request):
+    with session_scope() as db:
+        rows = db.execute(select(DeliverableReview).where(DeliverableReview.deliverable_id == deliverable_id)).scalars().all()
+        return {"items": [{"reviewer": r.reviewer, "action": r.action, "comment": r.comment} for r in rows]}
+
+
+# ── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+@app.get("/v1/notifications")
+def list_notifications(request: Request):
+    p = _jwt_payload(request)
+    with session_scope() as db:
+        rows = db.execute(select(NotificationRecord).where(NotificationRecord.org_id == p["org"]).order_by(NotificationRecord.created_at.desc()).limit(50)).scalars().all()
+        unread = sum(1 for n in rows if n.read_at is None)
+        return {"unread_count": unread, "items": [{"id": n.id, "title": n.title, "read": n.read_at is not None} for n in rows]}
 
 
 def tenant_of(user: User | None) -> str:
